@@ -1,0 +1,12 @@
+# xll-gen build + generated artifacts (regenerate with `xll-gen generate`).
+build/
+generated/
+temp_*/
+.vscode/
+
+# Go server binaries
+*.exe
+*.xll
+
+# Logs emitted next to the .xll (logging.dir = ${XLL_DIR})
+*.log

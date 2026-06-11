@@ -1,0 +1,176 @@
+# xll-gen-showcase — exercises EVERY xll-gen feature in one add-in.
+# Generate with:  xll-gen.exe generate
+project:
+  name: "xll_showcase"
+  version: "1.0.0"
+
+gen:
+  go:
+    package: "generated"
+  # Keep the SHM name stable (no PID tail) so logs/debugging are predictable
+  # for a single-instance demo. Set false in production multi-instance use.
+  disable_pid_suffix: true
+
+logging:
+  # DEBUG surfaces the per-call "Sync function start/end" traces in the log,
+  # which makes the demo's behavior observable. ${XLL_DIR} puts the log next
+  # to the .xll so a tester can find it without hunting.
+  level: "DEBUG"
+  dir: "${XLL_DIR}"
+
+build:
+  # singlefile: "" (standalone) is the SIMPLEST shape for a demo: the .xll and
+  # the Go server .exe are separate files, the XLL launches the server, and you
+  # can rebuild the Go server alone without re-linking C++. "xll" would embed
+  # the server into the .xll for single-file distribution — heavier to build.
+  singlefile: ""
+  temp_dir: ""
+
+server:
+  timeout: "10s"
+  async_ack_timeout: "2s"
+  workers: 0 # 0 => runtime.NumCPU()
+  launch:
+    enabled: true
+    command: "${BIN}"
+    cwd: "${BIN_DIR}"
+
+# Real-Time Data server — backs the Clock() and StockTick() streaming functions.
+rtd:
+  enabled: true
+  prog_id: "XllShowcase.Rtd"
+  description: "Real-Time Data Server for xll-gen-showcase"
+
+# ---------------------------------------------------------------------------
+# Worksheet functions — one of every type and execution mode.
+# ---------------------------------------------------------------------------
+functions:
+  # --- sync scalars: int / float / string / bool ---
+  - name: "Add"
+    description: "Adds two integers (sync int)."
+    category: "Showcase.Sync"
+    args:
+      - {name: "a", type: "int", description: "First addend."}
+      - {name: "b", type: "int", description: "Second addend."}
+    return: "int"
+
+  - name: "Multiply"
+    description: "Multiplies two numbers (sync float)."
+    category: "Showcase.Sync"
+    args:
+      - {name: "a", type: "float", description: "First factor."}
+      - {name: "b", type: "float", description: "Second factor."}
+    return: "float"
+
+  - name: "Greet"
+    description: "Returns a greeting (sync string)."
+    category: "Showcase.Sync"
+    args:
+      - {name: "name", type: "string", description: "Name to greet."}
+    return: "string"
+
+  - name: "IsEven"
+    description: "Reports whether n is even (sync bool)."
+    category: "Showcase.Sync"
+    args:
+      - {name: "n", type: "int", description: "Value to test."}
+    return: "bool"
+
+  # NOTE: a sync function with `return: "any"` (e.g. an `Echo(v any) -> any`)
+  # is intentionally OMITTED. xll-gen v0.4.0's Go generator emits
+  # `ipc.EchoResponseAddResult(b, res)` passing a *protocol.Any where the
+  # FlatBuffers setter expects a flatbuffers.UOffsetT, which does not compile.
+  # `any` is still fully showcased: as an ARGUMENT (grids are Any-typed cells)
+  # and as an RTD return (Clock/StockTick below stream `any`).
+
+  # --- grid input (2-D array) ---
+  - name: "SumGrid"
+    description: "Sums every numeric cell in a grid (grid -> float)."
+    category: "Showcase.Grid"
+    args:
+      - {name: "g", type: "grid", description: "A rectangular range of numbers."}
+    return: "float"
+
+  # --- caller-aware: receives the calling cell's reference ---
+  - name: "WhoAmI"
+    description: "Returns the address of the cell that called it (caller-aware)."
+    category: "Showcase.Caller"
+    caller: true
+    return: "string"
+
+  # --- volatile: recalculates on every sheet change / F9 ---
+  - name: "RandomLine"
+    description: "Returns a random quote; volatile (recalcs every F9)."
+    category: "Showcase.Volatile"
+    volatile: true
+    return: "string"
+
+  # --- async: ACKs immediately, result streamed back after work ---
+  - name: "SlowSquare"
+    description: "Squares n after a ~1.5s delay (async)."
+    category: "Showcase.Async"
+    mode: "async"
+    args:
+      - {name: "n", type: "int", description: "Value to square."}
+    return: "int"
+
+  # --- RTD: live-streaming cells ---
+  - name: "Clock"
+    description: "Streams the current time, once per second (RTD)."
+    category: "Showcase.RTD"
+    mode: "rtd"
+    return: "any"
+
+  - name: "StockTick"
+    description: "Streams a wandering mock price for a symbol (RTD)."
+    category: "Showcase.RTD"
+    mode: "rtd"
+    args:
+      - {name: "symbol", type: "string", description: "Ticker, e.g. AAPL."}
+    return: "any"
+
+# ---------------------------------------------------------------------------
+# Commands (macros) — Go handlers driven by sugar Excel automation.
+# Registered with macroType=2; invocable from ribbon buttons, Ctrl+Shift+<key>,
+# or Alt+F8 (runnable but not listed).
+# ---------------------------------------------------------------------------
+commands:
+  - name: "BuildShowcaseSheet"
+    description: "Builds a full demo worksheet showing every feature."
+  - name: "ClearShowcase"
+    description: "Clears the demo range built by BuildShowcaseSheet."
+  - name: "WriteTimestamp"
+    description: "Writes the current time to A1."
+    shortcut: "T"
+  - name: "SlowFill"
+    description: "Sleeps 5s then writes 'done' (proves STA stays responsive)."
+    shortcut: "S"
+  - name: "ShowContext"
+    description: "Surfaces the invoking CommandContext (name/control/PID)."
+
+# ---------------------------------------------------------------------------
+# Ribbon — structured mode; xll-gen generates the customUI XML.
+# ---------------------------------------------------------------------------
+ribbon:
+  tab: "xll-gen Showcase"
+  prog_id: "XllShowcase.Ribbon"
+  groups:
+    - label: "Demo"
+      buttons:
+        - {label: "Build Showcase Sheet", command: "BuildShowcaseSheet", size: "large"}
+        - {label: "Clear Showcase", command: "ClearShowcase"}
+    - label: "Commands"
+      buttons:
+        - {label: "Write Timestamp", command: "WriteTimestamp"}
+        - {label: "Slow Fill (5s)", command: "SlowFill"}
+        - {label: "Show Context", command: "ShowContext"}
+
+# ---------------------------------------------------------------------------
+# Events — subscribe to Excel's CalculationEnded with a custom handler name.
+# The handler uses generated.ScheduleSet to write a "last recalc" timestamp.
+# (We attach to the built-in CalculationEnded event type but rename its Go
+#  handler to OnRecalc — exercises the custom-handler-name path safely.)
+# ---------------------------------------------------------------------------
+events:
+  - type: "CalculationEnded"
+    handler: "OnRecalc"

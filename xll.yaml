@@ -76,12 +76,17 @@ functions:
       - {name: "n", type: "int", description: "Value to test."}
     return: "bool"
 
-  # NOTE: a sync function with `return: "any"` (e.g. an `Echo(v any) -> any`)
-  # is intentionally OMITTED. xll-gen v0.4.0's Go generator emits
-  # `ipc.EchoResponseAddResult(b, res)` passing a *protocol.Any where the
-  # FlatBuffers setter expects a flatbuffers.UOffsetT, which does not compile.
-  # `any` is still fully showcased: as an ARGUMENT (grids are Any-typed cells)
-  # and as an RTD return (Clock/StockTick below stream `any`).
+  # --- sync any -> any: the dynamic round-trip ---
+  # The handler receives the cell value as a *protocol.Any and returns a plain
+  # Go value (any); the generated server serializes it back into the cell.
+  # (Unsupported before xll-gen v0.4.2 — the generator emitted non-compiling
+  # Go for sync `return: "any"`.)
+  - name: "Echo"
+    description: "Returns its argument unchanged (sync any -> any)."
+    category: "Showcase.Sync"
+    args:
+      - {name: "v", type: "any", description: "Any scalar cell value."}
+    return: "any"
 
   # --- grid input (2-D array) ---
   - name: "SumGrid"

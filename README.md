@@ -94,6 +94,7 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | sync float | `Multiply(a,b float) -> float` | cell `=Multiply(1.5,4)` → 6 |
 | sync string | `Greet(name string) -> string` | cell `=Greet("Excel")` |
 | sync bool | `IsEven(n int) -> bool` | cell `=IsEven(10)` → TRUE |
+| sync `any` round-trip | `Echo(v any) -> any` | cell `=Echo("dynamic!")` echoes any scalar |
 | `grid` arg (2-D `any` cells) | `SumGrid(g grid) -> float` | cell `=SumGrid(E4:F5)` → 10 |
 | caller-aware | `WhoAmI() -> string` (`caller: true`) | cell `=WhoAmI()` reports its own address |
 | volatile | `RandomLine() -> string` (`volatile: true`) | cell `=RandomLine()`; changes on F9 |
@@ -108,16 +109,16 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | ribbon (structured) | `tab: "xll-gen Showcase"`, groups Demo + Commands | custom ribbon tab |
 | event + scheduling | `CalculationEnded` → `OnRecalc` | press **F9**; "Last recalc" cell stamps a time |
 
-### Intentional omission
+### Formerly omitted: sync `return: "any"`
 
-A **sync** function with `return: "any"` (e.g. `Echo(v any) -> any`) is
-**omitted**. xll-gen v0.4.0's Go generator emits
-`ipc.EchoResponseAddResult(b, res)`, passing a `*protocol.Any` where the
-FlatBuffers setter expects a `flatbuffers.UOffsetT` — that generated code does
-not compile. The `any` type is still fully covered: as a worksheet-function
-**argument** (grid cells are `any`-typed scalars) and as an **RTD return**
-(`Clock`/`StockTick` stream `any`). This is a genuine generator limitation
-surfaced by the showcase, not a gap in the demo.
+Earlier revisions omitted a **sync** function with `return: "any"`: xll-gen
+v0.4.0–v0.4.1's Go generator emitted `ipc.EchoResponseAddResult(b, res)`,
+passing a `*protocol.Any` where the FlatBuffers setter expects a
+`flatbuffers.UOffsetT` — non-compiling generated code. The generator now maps
+`return: "any"` to a plain Go `any` handler return and serializes it through
+the same canonical Go-value→`protocol.Any` mapping the RTD path uses, so
+`Echo(v any) -> any` above covers the last `any` position (argument, RTD
+return, and now sync return).
 
 ## sugar API used by the command handlers
 

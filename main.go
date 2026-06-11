@@ -51,6 +51,30 @@ func (s *Service) IsEven(ctx context.Context, n int32) (bool, error) {
 	return n%2 == 0, nil
 }
 
+// Echo returns its argument unchanged (sync any -> any). The cell value
+// arrives as a *protocol.Any read view; the handler returns a plain Go value
+// and the generated server serializes it back (string/int32/float/bool keep
+// their type; an empty or unreadable cell echoes as an empty cell).
+func (s *Service) Echo(ctx context.Context, v *protocol.Any) (any, error) {
+	sv, ok := server.ToScalar(v)
+	if !ok {
+		return nil, nil // empty / missing cell -> empty cell
+	}
+	switch sv.Type {
+	case protocol.AnyValueInt:
+		return sv.Int, nil
+	case protocol.AnyValueNum:
+		return sv.Num, nil
+	case protocol.AnyValueBool:
+		return sv.Bool, nil
+	case protocol.AnyValueStr:
+		return sv.Str, nil
+	case protocol.AnyValueErr:
+		return fmt.Sprintf("#ERR(%d)", sv.Err), nil
+	}
+	return nil, nil
+}
+
 // SumGrid sums every numeric cell in the incoming grid (grid -> float).
 func (s *Service) SumGrid(ctx context.Context, g *protocol.Grid) (float64, error) {
 	if g == nil {
@@ -227,6 +251,7 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			{"Multiply(1.5,4)", "=Multiply(1.5,4)", "sync float"},
 			{`Greet("Excel")`, `=Greet("Excel")`, "sync string"},
 			{"IsEven(10)", "=IsEven(10)", "sync bool"},
+			{`Echo("dynamic!")`, `=Echo("dynamic!")`, "sync any -> any"},
 			{"SumGrid(E4:F5)", "=SumGrid(E4:F5)", "grid -> 10"},
 			{"WhoAmI()", "=WhoAmI()", "caller-aware"},
 			{"RandomLine()", "=RandomLine()", "volatile (F9)"},

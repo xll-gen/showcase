@@ -28,9 +28,11 @@ curated so the layout reads as documentation.
 | [Task](https://taskfile.dev) | convenience build runner | optional |
 | Microsoft Excel (Windows) | runtime / E2E checklist | required to *run* it |
 
-The `xll-gen` CLI itself is built from the local checkout (see below). All
-module dependencies are public tagged releases (`xll-gen v0.4.0`,
-`sugar v0.8.0`, `types v0.2.8`, `shm v0.7.5`) — no `replace` directives.
+The `xll-gen` CLI itself is built from the local checkout (see below). This
+showcase **builds end-to-end with xll-gen ≥ v0.4.1**, which fixed the two C++
+codegen defects (`grid` argument + `caller`-aware) that previously blocked the
+`.xll`. Module dependencies are public tagged releases (`xll-gen v0.4.1`,
+`sugar v0.8.0`, `types v0.2.8`, `shm v0.7.3`) — no `replace` directives.
 
 ## Build
 
@@ -64,23 +66,22 @@ the `.xll` in Excel.
 - **Go server: compiles cleanly.** `go build ./...` and `go vet ./...` both
   pass, and `go build -o build/xll_showcase.exe .` produces the server. This
   is the mandatory gate and it is green.
-- **C++ XLL: blocked by two xll-gen v0.4.0 generator bugs.** CMake configures
-  and the build reaches 96% (every static dep + all sources compile) before
-  `xll_main.cpp` fails in exactly two generated functions:
-  - `SumGrid` (a `grid` argument) — the generator emits a call to
-    `GridToFlatBuffer(...)`, but the types library only provides
-    `ConvertGrid(...)`. Undeclared identifier.
-  - `WhoAmI` (`caller: true`) — the generated caller-resolution code passes
-    `ScopedXLOPER12*` to `xll::CallExcel` / `ConvertRange` (which expect
-    `LPXLOPER12`) and dereferences a `ScopedXLOPER12` with `->`. Type
-    mismatches.
+- **C++ XLL: builds end-to-end with xll-gen ≥ v0.4.1.** CMake configures and
+  the build reaches 100% — every static dep, all sources, and `xll_main.cpp`
+  compile, and the linker emits `build/xll_showcase.xll`. The two functions
+  that v0.4.0 mis-generated are now correct:
+  - `SumGrid` (a `grid` argument) — the generator now emits
+    `ConvertGrid(g, builder)` (the function the types library actually
+    provides), not the non-existent `GridToFlatBuffer(...)`.
+  - `WhoAmI` (`caller: true`) — the caller-resolution code now uses
+    `ScopedXLOPER12` correctly: `.get()` is passed to `xll::CallExcel` /
+    `ConvertRange` (which take `LPXLOPER12`) and members are read via
+    `.get()->`, so the type mismatches are gone.
 
-  Both are defects in xll-gen v0.4.0's **C++** templates for the `grid`-arg and
-  `caller`-aware paths; the Go side of those same functions compiles fine. No
-  other feature errors — sync/volatile/async/RTD/commands/ribbon/event all
-  compile. To produce a runnable `.xll` from this checkout you must either fix
-  those two C++ templates in xll-gen or drop `SumGrid`/`WhoAmI` from
-  `xll.yaml`.
+  Both were defects in xll-gen v0.4.0's **C++** templates for the `grid`-arg
+  and `caller`-aware paths; xll-gen #328 (v0.4.1) fixed them. No feature errors
+  remain — sync/volatile/async/RTD/commands/ribbon/event all compile and the
+  add-in links to a runnable `.xll`.
 
 ## Feature coverage
 

@@ -4,10 +4,10 @@ go 1.24.3
 
 require (
 	github.com/google/flatbuffers v25.9.23+incompatible
-	github.com/xll-gen/shm v0.7.5
+	github.com/xll-gen/shm v0.7.3
 	github.com/xll-gen/sugar v0.8.0
 	github.com/xll-gen/types v0.2.8
-	github.com/xll-gen/xll-gen v0.4.0
+	github.com/xll-gen/xll-gen v0.4.1
 )
 
 require (

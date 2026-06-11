@@ -59,6 +59,29 @@ The resulting `.xll` is under `build/cpp/`. Place it next to
 `build/xll_showcase.exe` (or point the launch config at the server) and open
 the `.xll` in Excel.
 
+### Build status (this checkout)
+
+- **Go server: compiles cleanly.** `go build ./...` and `go vet ./...` both
+  pass, and `go build -o build/xll_showcase.exe .` produces the server. This
+  is the mandatory gate and it is green.
+- **C++ XLL: blocked by two xll-gen v0.4.0 generator bugs.** CMake configures
+  and the build reaches 96% (every static dep + all sources compile) before
+  `xll_main.cpp` fails in exactly two generated functions:
+  - `SumGrid` (a `grid` argument) — the generator emits a call to
+    `GridToFlatBuffer(...)`, but the types library only provides
+    `ConvertGrid(...)`. Undeclared identifier.
+  - `WhoAmI` (`caller: true`) — the generated caller-resolution code passes
+    `ScopedXLOPER12*` to `xll::CallExcel` / `ConvertRange` (which expect
+    `LPXLOPER12`) and dereferences a `ScopedXLOPER12` with `->`. Type
+    mismatches.
+
+  Both are defects in xll-gen v0.4.0's **C++** templates for the `grid`-arg and
+  `caller`-aware paths; the Go side of those same functions compiles fine. No
+  other feature errors — sync/volatile/async/RTD/commands/ribbon/event all
+  compile. To produce a runnable `.xll` from this checkout you must either fix
+  those two C++ templates in xll-gen or drop `SumGrid`/`WhoAmI` from
+  `xll.yaml`.
+
 ## Feature coverage
 
 Every declared feature, and where to observe it. After clicking **Build

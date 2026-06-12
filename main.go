@@ -335,40 +335,90 @@ const showcaseAnchor = "A1" // top-left of the demo block
 
 // BuildShowcaseSheet is the centerpiece: it lays out a worksheet that exercises
 // every worksheet function and lists the ribbon/shortcut instructions.
+//
+// Speed: the build is dominated by cross-process COM round-trips, so it (1)
+// suspends ScreenUpdating + switches Calculation to manual for the whole build
+// (restored, with a single recalc, in a guaranteed cleanup path), and (2)
+// writes each contiguous area as ONE block — the A:C table values in a single
+// SetValue, the B-column formulas in a single SetFormula2Array, the E:F input
+// block, the H labels, and the instructions/recalc rows — instead of cell by
+// cell. The three spill anchors stay single-cell Formula2 writes (a spill
+// formula lives in one anchor). The layout is byte-for-byte the same as the
+// per-cell version.
 func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandContext) error {
-	return runExcel("BuildShowcaseSheet", func(sheet excel.Worksheet) error {
+	return runExcelApp("BuildShowcaseSheet", func(app excel.Application, sheet excel.Worksheet) (err error) {
 		header := excel.RGB(0x1F, 0x4E, 0x79) // dark blue fill
 		white := excel.RGB(0xFF, 0xFF, 0xFF)
 
-		// Title
+		// --- Suspend UI + recalc for the whole build ---------------------
+		// Capture the live settings so we restore exactly what the user had,
+		// then force ScreenUpdating off and Calculation to manual. Without
+		// this, every formula write triggers a recalc/repaint mid-build.
+		// The cleanup runs on EVERY return path (including errors and panics
+		// in the writes below) so the user's Excel is never left in manual
+		// calc / no-repaint — that is a real support nightmare. A single
+		// Application.Calculate at the end refreshes all the formulas we wrote.
+		prevCalc, calcErr := app.Calculation()
+		prevScreen, screenErr := app.ScreenUpdating()
+		if calcErr == nil {
+			app.SetCalculation(excel.CalculationManual)
+		}
+		if screenErr == nil {
+			app.SetScreenUpdating(false)
+		}
+		defer func() {
+			// Restore in reverse order; recalc once so written formulas
+			// evaluate. Restore errors do not mask a build error.
+			if calcErr == nil {
+				app.SetCalculation(prevCalc)
+			} else {
+				app.SetCalculation(excel.CalculationAutomatic)
+			}
+			app.Call("Calculate")
+			if screenErr == nil {
+				app.SetScreenUpdating(prevScreen)
+			} else {
+				app.SetScreenUpdating(true)
+			}
+		}()
+
+		// --- Title -------------------------------------------------------
 		title := sheet.Range("A1")
-		title.SetValue("xll-gen Showcase — every feature, live")
+		if err = title.SetValue("xll-gen Showcase — every feature, live").Err(); err != nil {
+			return err
+		}
 		title.Font().SetBold(true).SetSize(14)
 
-		// --- Worksheet Functions section ---
-		sheet.Range("A3").SetValue("Worksheet Functions")
+		// --- Worksheet Functions section --------------------------------
+		// Header rows A3:C4 written as one 2x3 block (col B/C of the title
+		// row left blank), then the fill/bold formatting applied per banner.
+		if err = sheet.Range("A3:C4").SetValue([][]any{
+			{"Worksheet Functions", nil, nil},
+			{"Function", "Live Result", "Notes"},
+		}).Err(); err != nil {
+			return err
+		}
 		fnHdr := sheet.Range("A3:C3")
 		fnHdr.SetColor(header)
 		fnHdr.Font().SetBold(true).SetColor(white)
-		sheet.Range("A4").SetValue("Function")
-		sheet.Range("B4").SetValue("Live Result")
-		sheet.Range("C4").SetValue("Notes")
 		sheet.Range("A4:C4").Font().SetBold(true)
 
-		// Populate an inline numeric block for SumGrid/StatsGrid to consume
-		// (E4:F5). This sits in columns E-F, clear of both the A-C function
-		// table and the H+ spill area below.
-		sheet.Range("E4").SetValue(1.0)
-		sheet.Range("F4").SetValue(2.0)
-		sheet.Range("E5").SetValue(3.0)
-		sheet.Range("F5").SetValue(4.0)
+		// Inline numeric block for SumGrid/StatsGrid (E4:F5), one block write.
+		// Columns E-F sit clear of the A-C table and the H+ spill area.
+		if err = sheet.Range("E4:F5").SetValue([][]any{
+			{1.0, 2.0},
+			{3.0, 4.0},
+		}).Err(); err != nil {
+			return err
+		}
 
 		// Scalar-result functions only. The three array-returning (spill)
 		// functions live in their own area (columns H+) so their spill ranges
-		// never collide with this single-column-result table. Formulas are
-		// written with SetFormulaSpill (Formula2-native) so dynamic-array Excel
-		// does not rewrite UDF calls into the implicit-intersection `=@Fn(...)`
-		// form.
+		// never collide with this single-column-result table. The whole A:C
+		// table is one block SetValue (labels in A, blanks in B, notes in C);
+		// the B-column formulas are then one SetFormula2Array — Formula2-native
+		// so dynamic-array Excel does not rewrite UDF calls into the
+		// implicit-intersection `=@Fn(...)` form.
 		rows := []struct{ label, formula, note string }{
 			{"Add(2,3)", "=Add(2,3)", "sync int"},
 			{"Multiply(1.5,4)", "=Multiply(1.5,4)", "sync float"},
@@ -382,14 +432,24 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			{"Clock()", "=Clock()", "RTD, ticks 1/s"},
 			{`StockTick("AAPL")`, `=StockTick("AAPL")`, "RTD, wandering price"},
 		}
+		const firstRow = 5
+		tableBlock := make([][]any, len(rows))   // A:C values, col B blank
+		formulaCol := make([][]any, len(rows))   // B column, one formula/cell
 		for i, r := range rows {
-			row := 5 + i
-			sheet.Range(fmt.Sprintf("A%d", row)).SetValue(r.label)
-			sheet.Range(fmt.Sprintf("B%d", row)).SetFormulaSpill(r.formula)
-			sheet.Range(fmt.Sprintf("C%d", row)).SetValue(r.note)
+			tableBlock[i] = []any{r.label, nil, r.note}
+			formulaCol[i] = []any{r.formula}
+		}
+		lastRow := firstRow + len(rows) - 1 // 15
+		if err = sheet.Range(fmt.Sprintf("A%d:C%d", firstRow, lastRow)).
+			SetValue(tableBlock).Err(); err != nil {
+			return err
+		}
+		if err = sheet.Range(fmt.Sprintf("B%d:B%d", firstRow, lastRow)).
+			SetFormula2Array(formulaCol).Err(); err != nil {
+			return err
 		}
 
-		// --- Dynamic Arrays (spill) section ---
+		// --- Dynamic Arrays (spill) section -----------------------------
 		//
 		// Each spill demo gets its FULL spill extent reserved plus blank-row
 		// margins, all in columns H..M so nothing here can trample the A-C
@@ -406,7 +466,9 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 		//   H20     label  "SlowMatrix(3,3) — async numgrid, spills 3x3"
 		//   H21     anchor =SlowMatrix(3,3)  -> spills H21:J23 (3 rows x 3 cols)
 		//   (row 24 blank margin)
-		sheet.Range("H3").SetValue("Dynamic Arrays (spill)")
+		if err = sheet.Range("H3").SetValue("Dynamic Arrays (spill)").Err(); err != nil {
+			return err
+		}
 		spHdr := sheet.Range("H3:M3")
 		spHdr.SetColor(header)
 		spHdr.Font().SetBold(true).SetColor(white)
@@ -419,19 +481,34 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			{12, 13, "StatsGrid(E4:F5) — grid, spills 6x2", "=StatsGrid(E4:F5)"},
 			{20, 21, "SlowMatrix(3,3) — async numgrid, spills 3x3", "=SlowMatrix(3,3)"},
 		}
+		// Labels at H5, H12, H20 written as ONE sparse column block H5:H20
+		// (intervening rows nil); the anchor formulas (H6/H13/H21) are written
+		// separately below, so nilling them here is harmless. Bold is applied
+		// per-label since the anchors between them must stay non-bold.
+		labelBlock := make([][]any, spills[len(spills)-1].labelRow-spills[0].labelRow+1)
+		for i := range labelBlock {
+			labelBlock[i] = []any{nil}
+		}
 		for _, sp := range spills {
-			lbl := sheet.Range(fmt.Sprintf("H%d", sp.labelRow))
-			lbl.SetValue(sp.label)
-			lbl.Font().SetBold(true)
-			sheet.Range(fmt.Sprintf("H%d", sp.anchorRow)).SetFormulaSpill(sp.formula)
+			labelBlock[sp.labelRow-spills[0].labelRow][0] = sp.label
+		}
+		if err = sheet.Range(fmt.Sprintf("H%d:H%d", spills[0].labelRow, spills[len(spills)-1].labelRow)).
+			SetValue(labelBlock).Err(); err != nil {
+			return err
+		}
+		for _, sp := range spills {
+			sheet.Range(fmt.Sprintf("H%d", sp.labelRow)).Font().SetBold(true)
+			// One spill formula per anchor cell — stays a single-cell Formula2
+			// write (a spill anchor is one cell, not a block).
+			if err = sheet.Range(fmt.Sprintf("H%d", sp.anchorRow)).
+				SetFormulaSpill(sp.formula).Err(); err != nil {
+				return err
+			}
 		}
 
-		// --- Instructions section ---
-		instrRow := 5 + len(rows) + 2
-		sheet.Range(fmt.Sprintf("A%d", instrRow)).SetValue("Ribbon & Shortcuts")
-		ih := sheet.Range(fmt.Sprintf("A%d:C%d", instrRow, instrRow))
-		ih.SetColor(header)
-		ih.Font().SetBold(true).SetColor(white)
+		// --- Instructions section ---------------------------------------
+		// Banner + 5 lines written as one A-column block (A18:A23).
+		instrRow := firstRow + len(rows) + 2 // 18
 		instructions := []string{
 			"Ribbon tab 'xll-gen Showcase' -> Demo: Build Showcase Sheet / Clear Showcase",
 			"Ribbon tab -> Commands: Write Timestamp / Slow Fill (5s) / Show Context",
@@ -439,14 +516,26 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			"Alt+F8 -> type a command name (e.g. ShowContext) -> Run",
 			"Press F9 to recalc; RandomLine and the 'last recalc' cell update.",
 		}
+		instrBlock := make([][]any, len(instructions)+1)
+		instrBlock[0] = []any{"Ribbon & Shortcuts"}
 		for i, line := range instructions {
-			sheet.Range(fmt.Sprintf("A%d", instrRow+1+i)).SetValue(line)
+			instrBlock[i+1] = []any{line}
 		}
+		instrLast := instrRow + len(instructions) // 23
+		if err = sheet.Range(fmt.Sprintf("A%d:A%d", instrRow, instrLast)).
+			SetValue(instrBlock).Err(); err != nil {
+			return err
+		}
+		ih := sheet.Range(fmt.Sprintf("A%d:C%d", instrRow, instrRow))
+		ih.SetColor(header)
+		ih.Font().SetBold(true).SetColor(white)
 
-		// 'last recalc' cell that the CalculationEnded handler updates.
-		recalcRow := instrRow + 1 + len(instructions) + 1
-		sheet.Range(fmt.Sprintf("A%d", recalcRow)).SetValue("Last recalc (set by event handler):")
-		sheet.Range(fmt.Sprintf("B%d", recalcRow)).SetValue("press F9")
+		// 'last recalc' marker + value, one A:B block.
+		recalcRow := instrRow + 1 + len(instructions) + 1 // 25
+		if err = sheet.Range(fmt.Sprintf("A%d:B%d", recalcRow, recalcRow)).
+			SetValue([][]any{{"Last recalc (set by event handler):", "press F9"}}).Err(); err != nil {
+			return err
+		}
 
 		return sheet.AutoFit()
 	})
@@ -497,6 +586,17 @@ func (s *Service) ShowContext(ctx context.Context, cmd server.CommandContext) er
 // can legitimately fail (no Excel, COM busy); we surface and log the error
 // rather than panicking the worker.
 func runExcel(name string, fn func(sheet excel.Worksheet) error) error {
+	return runExcelApp(name, func(_ excel.Application, sheet excel.Worksheet) error {
+		return fn(sheet)
+	})
+}
+
+// runExcelApp is runExcel's app-aware variant: fn also receives the
+// Application so a handler can toggle application-wide settings
+// (ScreenUpdating / Calculation) for the duration of its work. Everything
+// still runs inside the same sugar arena that releases every COM object on
+// return.
+func runExcelApp(name string, fn func(app excel.Application, sheet excel.Worksheet) error) error {
 	return sugar.Do(func(sctx sugar.Context) error {
 		app := excel.GetApplication(sctx)
 		if err := app.Err(); err != nil {
@@ -506,7 +606,7 @@ func runExcel(name string, fn func(sheet excel.Worksheet) error) error {
 		if err := sheet.Err(); err != nil {
 			return fmt.Errorf("%s: no active sheet: %w", name, err)
 		}
-		if err := fn(sheet); err != nil {
+		if err := fn(app, sheet); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		return nil

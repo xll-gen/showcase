@@ -69,7 +69,10 @@ functions:
       - {name: "name", type: "string", description: "Name to greet."}
     return: "string"
 
-  - name: "IsEven"
+  # NOTE: must not be named "IsEven" — ISEVEN is a built-in Excel worksheet
+  # function, which silently shadows the XLL registration: =IsEven(10) resolves
+  # to the built-in and the Go handler is never called.
+  - name: "IsEvenInt"
     description: "Reports whether n is even (sync bool)."
     category: "Showcase.Sync"
     args:
@@ -81,7 +84,11 @@ functions:
   # Go value (any); the generated server serializes it back into the cell.
   # (Unsupported before xll-gen v0.4.2 — the generator emitted non-compiling
   # Go for sync `return: "any"`.)
-  - name: "Echo"
+  # NOTE: must not be named "Echo" — ECHO is a built-in Excel 4.0 (XLM) macro
+  # command, and Excel rejects any worksheet formula using an XLM command name
+  # (manual entry fails; COM .Formula raises 0x800A03EC). Same trap for other
+  # XLM command names such as BEEP.
+  - name: "EchoAny"
     description: "Returns its argument unchanged (sync any -> any)."
     category: "Showcase.Sync"
     args:

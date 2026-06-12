@@ -46,16 +46,20 @@ func (s *Service) Greet(ctx context.Context, name string) (string, error) {
 	return "Hello, " + name + "!", nil
 }
 
-// IsEven reports whether n is even (sync bool).
-func (s *Service) IsEven(ctx context.Context, n int32) (bool, error) {
+// IsEvenInt reports whether n is even (sync bool). Named IsEvenInt, not
+// IsEven: ISEVEN is a built-in Excel worksheet function that silently shadows
+// an XLL registration of the same name.
+func (s *Service) IsEvenInt(ctx context.Context, n int32) (bool, error) {
 	return n%2 == 0, nil
 }
 
-// Echo returns its argument unchanged (sync any -> any). The cell value
+// EchoAny returns its argument unchanged (sync any -> any). The cell value
 // arrives as a *protocol.Any read view; the handler returns a plain Go value
 // and the generated server serializes it back (string/int32/float/bool keep
 // their type; an empty or unreadable cell echoes as an empty cell).
-func (s *Service) Echo(ctx context.Context, v *protocol.Any) (any, error) {
+// Named EchoAny, not Echo: ECHO is a built-in Excel 4.0 (XLM) macro command,
+// and Excel rejects worksheet formulas that use an XLM command name.
+func (s *Service) EchoAny(ctx context.Context, v *protocol.Any) (any, error) {
 	sv, ok := server.ToScalar(v)
 	if !ok {
 		return nil, nil // empty / missing cell -> empty cell
@@ -250,8 +254,8 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			{"Add(2,3)", "=Add(2,3)", "sync int"},
 			{"Multiply(1.5,4)", "=Multiply(1.5,4)", "sync float"},
 			{`Greet("Excel")`, `=Greet("Excel")`, "sync string"},
-			{"IsEven(10)", "=IsEven(10)", "sync bool"},
-			{`Echo("dynamic!")`, `=Echo("dynamic!")`, "sync any -> any"},
+			{"IsEvenInt(10)", "=IsEvenInt(10)", "sync bool"},
+			{`EchoAny("dynamic!")`, `=EchoAny("dynamic!")`, "sync any -> any"},
 			{"SumGrid(E4:F5)", "=SumGrid(E4:F5)", "grid -> 10"},
 			{"WhoAmI()", "=WhoAmI()", "caller-aware"},
 			{"RandomLine()", "=RandomLine()", "volatile (F9)"},

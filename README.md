@@ -98,8 +98,8 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | sync int | `Add(a,b int) -> int` | cell `=Add(2,3)` → 5 |
 | sync float | `Multiply(a,b float) -> float` | cell `=Multiply(1.5,4)` → 6 |
 | sync string | `Greet(name string) -> string` | cell `=Greet("Excel")` |
-| sync bool | `IsEven(n int) -> bool` | cell `=IsEven(10)` → TRUE |
-| sync `any` round-trip | `Echo(v any) -> any` | cell `=Echo("dynamic!")` echoes any scalar |
+| sync bool | `IsEvenInt(n int) -> bool` | cell `=IsEvenInt(10)` → TRUE (not `IsEven` — the built-in `ISEVEN` silently shadows an XLL function of the same name) |
+| sync `any` round-trip | `EchoAny(v any) -> any` | cell `=EchoAny("dynamic!")` echoes any scalar (not `Echo` — `ECHO` is an XLM macro command; Excel rejects the formula outright) |
 | `grid` arg (2-D `any` cells) | `SumGrid(g grid) -> float` | cell `=SumGrid(E4:F5)` → 10 |
 | caller-aware | `WhoAmI() -> string` (`caller: true`) | cell `=WhoAmI()` reports its own address |
 | volatile | `RandomLine() -> string` (`volatile: true`) | cell `=RandomLine()`; changes on F9 |
@@ -123,7 +123,7 @@ passing a `*protocol.Any` where the FlatBuffers setter expects a
 `flatbuffers.UOffsetT` — non-compiling generated code. The generator now maps
 `return: "any"` to a plain Go `any` handler return and serializes it through
 the same canonical Go-value→`protocol.Any` mapping the RTD path uses, so
-`Echo(v any) -> any` above covers the last `any` position (argument, RTD
+`EchoAny(v any) -> any` above covers the last `any` position (argument, RTD
 return, and now sync return).
 
 ## sugar API used by the command handlers
@@ -188,7 +188,7 @@ Each item maps to a button or cell.
    formatting), the function table with **live** results in column B, an inline
    numeric block (E4:F5) feeding `SumGrid`, and an instructions block.
 9. **Sync types.** Verify `Add`→5, `Multiply`→6, `Greet`→`Hello, Excel!`,
-   `IsEven`→TRUE, `SumGrid(E4:F5)`→10.
+   `IsEvenInt`→TRUE, `EchoAny`→`dynamic!`, `SumGrid(E4:F5)`→10.
 10. **Caller-aware.** `WhoAmI()` reports the address of its own cell.
 11. **Volatile.** Note `RandomLine()`'s value, press **F9** → it changes (and
     the "Last recalc" cell updates from the `CalculationEnded` → `OnRecalc`

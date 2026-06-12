@@ -164,8 +164,11 @@ through sugar. APIs actually used (verified against `sugar/excel/*.go`):
 - `excel.GetApplication(ctx)` → `Application`
 - `app.Books().Active()` → `Workbook`; `wb.Sheets().Active()` → `Worksheet`
 - `sheet.Range(addr)`, `sheet.UsedRange()`, `sheet.Clear()`, `sheet.AutoFit()`
-- `Range.SetValue`, `Range.SetFormula`, `Range.SetColor`, `Range.Find`,
-  `Range.Row`, `Range.Err`
+- `Range.SetValue`, `Range.SetFormulaSpill`, `Range.SetColor`, `Range.Find`,
+  `Range.Row`, `Range.Err` (`SetFormulaSpill` writes via the dynamic-array-native
+  `Formula2` COM property — with a graceful fallback to legacy `Formula` on
+  pre-DA Excel — so UDF calls are not rewritten into the implicit-intersection
+  `=@Fn(...)` form, which would suppress spilling)
 - `Range.Font()` → `Font.SetBold` / `SetSize` / `SetColor`
 - `excel.RGB(r,g,b)` for fills and font colors
 - Arena lifecycle via `sugar.Do(func(ctx sugar.Context) error { ... })`, which
@@ -219,12 +222,17 @@ Each item maps to a button or cell.
    numeric block (E4:F5) feeding `SumGrid`, and an instructions block.
 9. **Sync types.** Verify `Add`→5, `Multiply`→6, `Greet`→`Hello, Excel!`,
    `IsEvenInt`→TRUE, `EchoAny`→`dynamic!`, `SumGrid(E4:F5)`→10.
-9b. **Spill (dynamic arrays).** On Excel 2021+/365, `=TimesTable(5)` spills a
-    5×5 multiplication table and `=StatsGrid(E4:F5)` spills a 2-column
-    Count/Sum/Mean/Min/Max summary into the cells below/right of the formula
-    cell (a blue spill border on selection). `=SlowMatrix(3,3)` spills a 3×3
-    matrix ~1.5s after entry — proving async results spill too. On pre-DA Excel
-    each shows only its top-left cell unless entered as a CSE array.
+9b. **Spill (dynamic arrays).** The three array functions live in their own
+    **Dynamic Arrays (spill)** area (columns H+), each with its full spill
+    extent reserved and blank-row margins so no spill collides with another
+    cell. On Excel 2021+/365, `=TimesTable(5)` (anchor `H6`) spills a 5×5
+    multiplication table into `H6:L10`; `=StatsGrid(E4:F5)` (anchor `H13`)
+    spills a 2-column Count/Sum/Mean/Min/Max summary into `H13:I18`;
+    `=SlowMatrix(3,3)` (anchor `H21`) spills a 3×3 matrix into `H21:J23` ~1.5s
+    after entry — proving async results spill too. Each anchor shows a blue
+    spill border on selection and **no leading `@`** in the formula bar (the
+    formulas are written via `Formula2`). On pre-DA Excel each shows only its
+    top-left cell unless entered as a CSE array.
 10. **Caller-aware.** `WhoAmI()` reports the address of its own cell.
 11. **Volatile.** Note `RandomLine()`'s value, press **F9** → it changes (and
     the "Last recalc" cell updates from the `CalculationEnded` → `OnRecalc`

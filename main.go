@@ -355,12 +355,20 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 		sheet.Range("C4").SetValue("Notes")
 		sheet.Range("A4:C4").Font().SetBold(true)
 
-		// Populate an inline numeric block for SumGrid to consume (E4:F5).
+		// Populate an inline numeric block for SumGrid/StatsGrid to consume
+		// (E4:F5). This sits in columns E-F, clear of both the A-C function
+		// table and the H+ spill area below.
 		sheet.Range("E4").SetValue(1.0)
 		sheet.Range("F4").SetValue(2.0)
 		sheet.Range("E5").SetValue(3.0)
 		sheet.Range("F5").SetValue(4.0)
 
+		// Scalar-result functions only. The three array-returning (spill)
+		// functions live in their own area (columns H+) so their spill ranges
+		// never collide with this single-column-result table. Formulas are
+		// written with SetFormulaSpill (Formula2-native) so dynamic-array Excel
+		// does not rewrite UDF calls into the implicit-intersection `=@Fn(...)`
+		// form.
 		rows := []struct{ label, formula, note string }{
 			{"Add(2,3)", "=Add(2,3)", "sync int"},
 			{"Multiply(1.5,4)", "=Multiply(1.5,4)", "sync float"},
@@ -368,9 +376,6 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			{"IsEvenInt(10)", "=IsEvenInt(10)", "sync bool"},
 			{`EchoAny("dynamic!")`, `=EchoAny("dynamic!")`, "sync any -> any"},
 			{"SumGrid(E4:F5)", "=SumGrid(E4:F5)", "grid -> 10"},
-			{"TimesTable(5)", "=TimesTable(5)", "numgrid, spills 5x5"},
-			{"StatsGrid(E4:F5)", "=StatsGrid(E4:F5)", "grid -> spilled summary"},
-			{"SlowMatrix(3,3)", "=SlowMatrix(3,3)", "async numgrid, spills 3x3"},
 			{"WhoAmI()", "=WhoAmI()", "caller-aware"},
 			{"RandomLine()", "=RandomLine()", "volatile (F9)"},
 			{"SlowSquare(9)", "=SlowSquare(9)", "async, ~1.5s -> 81"},
@@ -380,8 +385,45 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 		for i, r := range rows {
 			row := 5 + i
 			sheet.Range(fmt.Sprintf("A%d", row)).SetValue(r.label)
-			sheet.Range(fmt.Sprintf("B%d", row)).SetFormula(r.formula)
+			sheet.Range(fmt.Sprintf("B%d", row)).SetFormulaSpill(r.formula)
 			sheet.Range(fmt.Sprintf("C%d", row)).SetValue(r.note)
+		}
+
+		// --- Dynamic Arrays (spill) section ---
+		//
+		// Each spill demo gets its FULL spill extent reserved plus blank-row
+		// margins, all in columns H..M so nothing here can trample the A-C
+		// function table or the E-F SumGrid block. Layout (1 blank margin row
+		// between demos; the anchor is one row below its label):
+		//
+		//   H3:M3   section header
+		//   H5      label  "TimesTable(5) — numgrid, spills 5x5"
+		//   H6      anchor =TimesTable(5)   -> spills H6:L10   (5 rows x 5 cols)
+		//   (row 11 blank margin)
+		//   H12     label  "StatsGrid(E4:F5) — grid, spills 6x2"
+		//   H13     anchor =StatsGrid(E4:F5) -> spills H13:I18 (6 rows x 2 cols)
+		//   (row 19 blank margin)
+		//   H20     label  "SlowMatrix(3,3) — async numgrid, spills 3x3"
+		//   H21     anchor =SlowMatrix(3,3)  -> spills H21:J23 (3 rows x 3 cols)
+		//   (row 24 blank margin)
+		sheet.Range("H3").SetValue("Dynamic Arrays (spill)")
+		spHdr := sheet.Range("H3:M3")
+		spHdr.SetColor(header)
+		spHdr.Font().SetBold(true).SetColor(white)
+
+		spills := []struct {
+			labelRow, anchorRow int
+			label, formula      string
+		}{
+			{5, 6, "TimesTable(5) — numgrid, spills 5x5", "=TimesTable(5)"},
+			{12, 13, "StatsGrid(E4:F5) — grid, spills 6x2", "=StatsGrid(E4:F5)"},
+			{20, 21, "SlowMatrix(3,3) — async numgrid, spills 3x3", "=SlowMatrix(3,3)"},
+		}
+		for _, sp := range spills {
+			lbl := sheet.Range(fmt.Sprintf("H%d", sp.labelRow))
+			lbl.SetValue(sp.label)
+			lbl.Font().SetBold(true)
+			sheet.Range(fmt.Sprintf("H%d", sp.anchorRow)).SetFormulaSpill(sp.formula)
 		}
 
 		// --- Instructions section ---

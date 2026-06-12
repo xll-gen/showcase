@@ -40,6 +40,9 @@ rtd:
   enabled: true
   prog_id: "XllShowcase.Rtd"
   description: "Real-Time Data Server for xll-gen-showcase"
+  # Demo of explicit throttle control: Clock() ticks 1/s, which Excel's 2s
+  # default throttle would visibly batch. NOTE: registry-persisted per user.
+  throttle_interval: "250ms"
 
 # ---------------------------------------------------------------------------
 # Worksheet functions — one of every type and execution mode.

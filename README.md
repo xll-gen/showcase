@@ -101,6 +101,9 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | sync bool | `IsEvenInt(n int) -> bool` | cell `=IsEvenInt(10)` → TRUE (not `IsEven` — the built-in `ISEVEN` silently shadows an XLL function of the same name) |
 | sync `any` round-trip | `EchoAny(v any) -> any` | cell `=EchoAny("dynamic!")` echoes any scalar (not `Echo` — `ECHO` is an XLM macro command; Excel rejects the formula outright) |
 | `grid` arg (2-D `any` cells) | `SumGrid(g grid) -> float` | cell `=SumGrid(E4:F5)` → 10 |
+| spill `numgrid` (dense FP12) | `TimesTable(n int) -> numgrid` | cell `=TimesTable(5)` → spills a 5×5 multiplication table |
+| spill `grid` (mixed cells) | `StatsGrid(g grid) -> grid` | cell `=StatsGrid(E4:F5)` → spills a 2-col Count/Sum/Mean/Min/Max summary |
+| spill async `numgrid` | `SlowMatrix(rows,cols int) -> numgrid` (`mode: async`) | cell `=SlowMatrix(3,3)`; ~1.5s then spills a 3×3 matrix |
 | caller-aware | `WhoAmI() -> string` (`caller: true`) | cell `=WhoAmI()` reports its own address |
 | volatile | `RandomLine() -> string` (`volatile: true`) | cell `=RandomLine()`; changes on F9 |
 | async | `SlowSquare(n int) -> int` (`mode: async`) | cell `=SlowSquare(9)`; ~1.5s then 81 |
@@ -125,6 +128,33 @@ passing a `*protocol.Any` where the FlatBuffers setter expects a
 the same canonical Go-value→`protocol.Any` mapping the RTD path uses, so
 `EchoAny(v any) -> any` above covers the last `any` position (argument, RTD
 return, and now sync return).
+
+### Dynamic arrays (spill)
+
+`TimesTable`, `StatsGrid`, and `SlowMatrix` demo xll-gen's **spill** support: a
+sync or async function may return a 2-D array that Excel spills across the cells
+below/right of the formula cell.
+
+- **`numgrid`** (`[][]float64`, dense, serialized as FP12): `TimesTable(n)` and
+  the async `SlowMatrix(rows,cols)`.
+- **`grid`** (`[][]any`, mixed `nil`/`bool`/`string`/int/float cells):
+  `StatsGrid(g)` consumes a `grid` argument (same `*protocol.Grid` read view as
+  `SumGrid`) and returns a 2-column label/value summary mixing string labels
+  with numbers.
+
+Type `=TimesTable(5)` in one cell and watch it **spill** into a 5×5 block
+(`(r+1)*(c+1)`). `=SlowMatrix(3,3)` shows that an **async** result spills the
+same way — the XLL ACKs immediately and the array streams back through the
+identical conversion path.
+
+> **Excel-version behavior:** on **dynamic-array Excel (2021+/365)** these
+> spill automatically — no registration flag is required (return code `Q` for
+> `grid`, `K%`/FP12 for `numgrid`). On **pre-dynamic-array Excel** the formula
+> returns only the **top-left cell**; to see the whole array, pre-select a
+> range and enter the formula as a legacy **CSE array** (`Ctrl+Shift+Enter`).
+> A jagged or empty grid is reported as the function's error in the cell. The
+> `range` type is **not** supported as a return (`U`-coded returns break Excel
+> registration — use `grid`/`numgrid` for spilling arrays).
 
 ## sugar API used by the command handlers
 
@@ -189,6 +219,12 @@ Each item maps to a button or cell.
    numeric block (E4:F5) feeding `SumGrid`, and an instructions block.
 9. **Sync types.** Verify `Add`→5, `Multiply`→6, `Greet`→`Hello, Excel!`,
    `IsEvenInt`→TRUE, `EchoAny`→`dynamic!`, `SumGrid(E4:F5)`→10.
+9b. **Spill (dynamic arrays).** On Excel 2021+/365, `=TimesTable(5)` spills a
+    5×5 multiplication table and `=StatsGrid(E4:F5)` spills a 2-column
+    Count/Sum/Mean/Min/Max summary into the cells below/right of the formula
+    cell (a blue spill border on selection). `=SlowMatrix(3,3)` spills a 3×3
+    matrix ~1.5s after entry — proving async results spill too. On pre-DA Excel
+    each shows only its top-left cell unless entered as a CSE array.
 10. **Caller-aware.** `WhoAmI()` reports the address of its own cell.
 11. **Volatile.** Note `RandomLine()`'s value, press **F9** → it changes (and
     the "Last recalc" cell updates from the `CalculationEnded` → `OnRecalc`

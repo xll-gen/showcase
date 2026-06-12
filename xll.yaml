@@ -106,7 +106,43 @@ functions:
       - {name: "g", type: "grid", description: "A rectangular range of numbers."}
     return: "float"
 
+  # --- dynamic arrays (spill): functions that return a 2-D array ---
+  # A `grid`/`numgrid` return spills across the cells below/right of the formula
+  # cell on dynamic-array Excel (2021+/365). On pre-DA Excel the formula yields
+  # only the TOP-LEFT cell; enter it as a legacy CSE array (Ctrl+Shift+Enter)
+  # over a pre-selected range to see every cell. `range` returns are unsupported.
+  - name: "TimesTable"
+    description: "Spills an n x n multiplication table (numgrid -> dense FP12)."
+    category: "Showcase.Spill"
+    args:
+      - {name: "n", type: "int", description: "Side length of the table (1..n)."}
+    return: "numgrid"
+
+  - name: "StatsGrid"
+    description: "Spills a 2-column Count/Sum/Mean/Min/Max summary (grid -> mixed grid)."
+    category: "Showcase.Spill"
+    args:
+      - {name: "g", type: "grid", description: "A rectangular range of numbers."}
+    return: "grid"
+
+  # async spills too: the XLL ACKs immediately and the resulting array streams
+  # back and spills via the same conversion path as a sync grid return.
+  - name: "SlowMatrix"
+    description: "Spills a rows x cols matrix after a ~1.5s delay (async numgrid)."
+    category: "Showcase.Spill"
+    mode: "async"
+    args:
+      - {name: "rows", type: "int", description: "Number of rows."}
+      - {name: "cols", type: "int", description: "Number of columns."}
+    return: "numgrid"
+
   # --- caller-aware: receives the calling cell's reference ---
+  # As of xll-gen v0.5.0 caller/macro are split: caller:true alone is
+  # position-only and thread-safe ('$'). It does NOT fetch the caller's number
+  # format (Range.Format() is empty); to read the format the function would
+  # also need macro:true (registers as a macro-sheet equivalent '#', dropping
+  # thread safety). WhoAmI only reads the caller's position, so caller-only is
+  # correct here and it gains thread-safe registration.
   - name: "WhoAmI"
     description: "Returns the address of the cell that called it (caller-aware)."
     category: "Showcase.Caller"

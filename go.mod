@@ -6,8 +6,8 @@ require (
 	github.com/google/flatbuffers v25.9.23+incompatible
 	github.com/xll-gen/shm v0.7.3
 	github.com/xll-gen/sugar v0.8.0
-	github.com/xll-gen/types v0.2.9
-	github.com/xll-gen/xll-gen v0.4.2
+	github.com/xll-gen/types v0.2.10
+	github.com/xll-gen/xll-gen v0.5.0
 )
 
 require (

@@ -162,8 +162,12 @@ ribbon:
   groups:
     - label: "Demo"
       buttons:
-        - {label: "Build Showcase Sheet", command: "BuildShowcaseSheet", size: "large"}
-        - {label: "Clear Showcase", command: "ClearShowcase"}
+        # PNG file icons (xll-gen > v0.4.2): embedded into the .xll at build
+        # time and decoded with GDI+ at runtime — the transparent corners
+        # verify the alpha-preserving loadImage path on a real ribbon.
+        # Regenerate the PNGs with: go run tools/gen_icons.go
+        - {label: "Build Showcase Sheet", command: "BuildShowcaseSheet", size: "large", image: "./icons/build.png"}
+        - {label: "Clear Showcase", command: "ClearShowcase", image: "./icons/clear.png"}
     - label: "Commands"
       buttons:
         - {label: "Write Timestamp", command: "WriteTimestamp"}

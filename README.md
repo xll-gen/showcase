@@ -31,8 +31,13 @@ curated so the layout reads as documentation.
 The `xll-gen` CLI itself is built from the local checkout (see below). This
 showcase **builds end-to-end with xll-gen ≥ v0.4.1**, which fixed the two C++
 codegen defects (`grid` argument + `caller`-aware) that previously blocked the
-`.xll`. Module dependencies are public tagged releases (`xll-gen v0.4.1`,
+`.xll`. Module dependencies are public tagged releases (`xll-gen v0.4.2`,
 `sugar v0.8.0`, `types v0.2.8`, `shm v0.7.3`) — no `replace` directives.
+
+> **Note:** the ribbon **PNG file icons** (`image: ./icons/*.png`) need a CLI
+> built from xll-gen **after v0.4.2** (PR #331, on `main`). An older CLI emits
+> the path as a (broken) `imageMso` name — the add-in still builds and runs,
+> the buttons just lose their icons. The Go *module* dependency is unaffected.
 
 ## Build
 
@@ -107,6 +112,7 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | command + shortcut | `SlowFill` (`shortcut: S`) | ribbon **Commands** / **Ctrl+Shift+S** → 5s then "done" |
 | command (CommandContext) | `ShowContext` | ribbon **Commands → Show Context** → name/control/PID into cells |
 | ribbon (structured) | `tab: "xll-gen Showcase"`, groups Demo + Commands | custom ribbon tab |
+| ribbon PNG file icons | `image: ./icons/build.png` (32×32, large) and `./icons/clear.png` (16×16) | **Demo** buttons render embedded PNG icons with transparent corners (GDI+ loadImage path; requires xll-gen > v0.4.2 — regenerate icons via `go run tools/gen_icons.go`) |
 | event + scheduling | `CalculationEnded` → `OnRecalc` | press **F9**; "Last recalc" cell stamps a time |
 
 ### Formerly omitted: sync `return: "any"`
@@ -153,6 +159,10 @@ Each item maps to a button or cell.
    **Demo** group (Build Showcase Sheet [large], Clear Showcase) and the
    **Commands** group (Write Timestamp, Slow Fill (5s), Show Context). Any
    non-ASCII labels render correctly (embedded as XML numeric character refs).
+   **PNG icons render:** Build Showcase Sheet shows a green ⊕ (32×32) and
+   Clear Showcase a red ⊗ (16×16), both with *transparent* corners — the
+   circle edge must blend into the ribbon background, not sit in a white/black
+   square (verifies the alpha-preserving GDI+ `loadImage` path).
 2. **Button → handler.** Click **Write Timestamp** → A1 shows
    `WriteTimestamp @ HH:MM:SS` (the Go handler ran and drove Excel via sugar).
 3. **Slow handler stays responsive.** Click **Slow Fill (5s)**; immediately

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/xll-gen/sugar"
@@ -346,7 +347,7 @@ const showcaseAnchor = "A1" // top-left of the demo block
 // formula lives in one anchor). The layout is byte-for-byte the same as the
 // per-cell version.
 func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandContext) error {
-	return runExcelApp("BuildShowcaseSheet", func(app excel.Application, sheet excel.Worksheet) (err error) {
+	return runExcelApp("BuildShowcaseSheet", cmd.ExcelPID, func(app excel.Application, sheet excel.Worksheet) (err error) {
 		header := excel.RGB(0x1F, 0x4E, 0x79) // dark blue fill
 		white := excel.RGB(0xFF, 0xFF, 0xFF)
 
@@ -543,14 +544,14 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 
 // ClearShowcase clears everything the demo wrote.
 func (s *Service) ClearShowcase(ctx context.Context, cmd server.CommandContext) error {
-	return runExcel("ClearShowcase", func(sheet excel.Worksheet) error {
+	return runExcel("ClearShowcase", cmd.ExcelPID, func(sheet excel.Worksheet) error {
 		return sheet.Clear()
 	})
 }
 
 // WriteTimestamp writes the current time to A1 (also bound to Ctrl+Shift+T).
 func (s *Service) WriteTimestamp(ctx context.Context, cmd server.CommandContext) error {
-	return runExcel("WriteTimestamp", func(sheet excel.Worksheet) error {
+	return runExcel("WriteTimestamp", cmd.ExcelPID, func(sheet excel.Worksheet) error {
 		return sheet.Range(showcaseAnchor).
 			SetValue("WriteTimestamp @ " + time.Now().Format("15:04:05")).Err()
 	})
@@ -560,7 +561,7 @@ func (s *Service) WriteTimestamp(ctx context.Context, cmd server.CommandContext)
 // runs, proving the fire-and-forget STA contract (also bound to Ctrl+Shift+S).
 func (s *Service) SlowFill(ctx context.Context, cmd server.CommandContext) error {
 	time.Sleep(5 * time.Second)
-	return runExcel("SlowFill", func(sheet excel.Worksheet) error {
+	return runExcel("SlowFill", cmd.ExcelPID, func(sheet excel.Worksheet) error {
 		return sheet.Range(showcaseAnchor).
 			SetValue("SlowFill done @ " + time.Now().Format("15:04:05")).Err()
 	})
@@ -569,7 +570,7 @@ func (s *Service) SlowFill(ctx context.Context, cmd server.CommandContext) error
 // ShowContext surfaces the invoking CommandContext into cells A1:B3, proving
 // the ribbon control id / command name / Excel PID round-trip.
 func (s *Service) ShowContext(ctx context.Context, cmd server.CommandContext) error {
-	return runExcel("ShowContext", func(sheet excel.Worksheet) error {
+	return runExcel("ShowContext", cmd.ExcelPID, func(sheet excel.Worksheet) error {
 		sheet.Range("A1").SetValue("CommandName")
 		sheet.Range("B1").SetValue(cmd.CommandName)
 		sheet.Range("A2").SetValue("ControlID")
@@ -582,13 +583,34 @@ func (s *Service) ShowContext(ctx context.Context, cmd server.CommandContext) er
 
 // runExcel is the shared scaffold for command handlers. It attaches to the
 // running Excel instance, resolves the active worksheet, and runs fn — all
-// inside a sugar arena that releases every COM object on return. GetApplication
+// inside a sugar arena that releases every COM object on return. attachExcel
 // can legitimately fail (no Excel, COM busy); we surface and log the error
 // rather than panicking the worker.
-func runExcel(name string, fn func(sheet excel.Worksheet) error) error {
-	return runExcelApp(name, func(_ excel.Application, sheet excel.Worksheet) error {
+func runExcel(name string, excelPID uint32, fn func(sheet excel.Worksheet) error) error {
+	return runExcelApp(name, excelPID, func(_ excel.Application, sheet excel.Worksheet) error {
 		return fn(sheet)
 	})
+}
+
+// attachExcel attaches to the EXACT Excel instance that invoked the command.
+// The Go server runs as Excel's child process, so the Running Object Table is
+// not reachable from its COM apartment — the ROT-based excel.GetApplication
+// fails with "작업을 사용할 수 없습니다" (MK_E_UNAVAILABLE). The command carries the
+// hosting Excel's PID (CommandContext.ExcelPID), so we attach by PID via the
+// XLMAIN->XLDESK->EXCEL7 window walk. We fall back to the ROT path only when no
+// PID is available (PID 0), so shortcut/Alt+F8 paths that lack one still work
+// in single-instance setups.
+func attachExcel(sctx sugar.Context, excelPID uint32) excel.Application {
+	if excelPID != 0 {
+		app := excel.GetApplicationByPID(sctx, excelPID)
+		if app.Err() == nil {
+			return app
+		}
+		// Fall through to the ROT path as a best-effort backup (e.g. window
+		// chain transiently unavailable); the original error is preserved if
+		// that also fails.
+	}
+	return excel.GetApplication(sctx)
 }
 
 // runExcelApp is runExcel's app-aware variant: fn also receives the
@@ -596,9 +618,9 @@ func runExcel(name string, fn func(sheet excel.Worksheet) error) error {
 // (ScreenUpdating / Calculation) for the duration of its work. Everything
 // still runs inside the same sugar arena that releases every COM object on
 // return.
-func runExcelApp(name string, fn func(app excel.Application, sheet excel.Worksheet) error) error {
+func runExcelApp(name string, excelPID uint32, fn func(app excel.Application, sheet excel.Worksheet) error) error {
 	return sugar.Do(func(sctx sugar.Context) error {
-		app := excel.GetApplication(sctx)
+		app := attachExcel(sctx, excelPID)
 		if err := app.Err(); err != nil {
 			return fmt.Errorf("%s: cannot attach to Excel: %w", name, err)
 		}
@@ -622,7 +644,11 @@ func runExcelApp(name string, fn func(app excel.Application, sheet excel.Workshe
 // the write happens on Excel's thread at a safe point.
 func (s *Service) OnRecalc(ctx context.Context) error {
 	_ = sugar.Do(func(sctx sugar.Context) error {
-		app := excel.GetApplication(sctx)
+		// Events carry no CommandContext, but the Go server is launched as
+		// Excel's child, so the hosting Excel's PID is our parent PID — attach
+		// by it (same window-walk reason as the command handlers; the ROT is
+		// unreachable from this process).
+		app := attachExcel(sctx, uint32(os.Getppid()))
 		if err := app.Err(); err != nil {
 			return err
 		}

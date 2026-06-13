@@ -180,6 +180,35 @@ functions:
       - {name: "symbol", type: "string", description: "Ticker, e.g. AAPL."}
     return: "any"
 
+  # --- Live market data: Yahoo-style Yahoo Finance functions ---
+  # mode:"rtd-once" gives a network handler the ideal Excel UX: the cell shows
+  # #GETTING_DATA, the handler runs ONCE off the calc thread (Excel never
+  # blocks on the HTTP round-trip), and the cell settles when the fetch
+  # returns. memoize_ttl caches the result per-args for 10 minutes so repeated
+  # recalcs within the window do not re-hit Yahoo.
+  - name: "YDP"
+    description: "Yahoo Data Point: one live quote field for a ticker (rtd-once)."
+    category: "Showcase.Finance"
+    mode: "rtd-once"
+    memoize_ttl: "10m"
+    args:
+      - {name: "ticker", type: "string", description: "Symbol, e.g. AAPL."}
+      - {name: "field", type: "string", description: "Field: price, prevclose, change, change%, currency, exchange, high, low, volume, time, high52, low52."}
+    return: "any"
+
+  # The headline rtd-once-GRID demo: a non-blocking network fetch whose [][]any
+  # result SPILLS an OHLCV table. RTD can only deliver a scalar, so the grid
+  # rides the new guest->host grid path and spills on the RTD-triggered recalc.
+  - name: "YDH"
+    description: "Yahoo Data History: spills a historical OHLCV table for a ticker (rtd-once grid)."
+    category: "Showcase.Finance"
+    mode: "rtd-once"
+    memoize_ttl: "10m"
+    args:
+      - {name: "ticker", type: "string", description: "Symbol, e.g. MSFT."}
+      - {name: "days", type: "int", description: "Look-back window in calendar days (1..3650)."}
+    return: "grid"
+
 # ---------------------------------------------------------------------------
 # Commands (macros) — Go handlers driven by sugar Excel automation.
 # Registered with macroType=2; invocable from ribbon buttons, Ctrl+Shift+<key>,

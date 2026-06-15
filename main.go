@@ -405,11 +405,13 @@ func (s *Service) YDP(ctx context.Context, ticker, field string) (any, error) {
 // is the end-to-end demo of the rtd-once grid-spill feature: a non-blocking
 // network fetch whose result spills via the new guest->host grid path.
 //
-// The Date column is returned as a real time.Time, so xll-gen serializes it to
-// an Excel date serial and auto-formats the data cells as yyyy-mm-dd at
-// calc-end — value-driven, per-cell date formatting (the header string and the
-// numeric OHLCV columns are left untouched). The dates are real Excel dates,
-// sortable and usable in date arithmetic, not text.
+// The Date column is returned as a real time.Time carrying the bar's market
+// timestamp (the time-of-day is kept intentionally, not normalized to
+// midnight), so xll-gen serializes it to an Excel date-time serial and
+// auto-formats the data cells as yyyy-mm-dd hh:mm:ss at calc-end —
+// value-driven, per-cell formatting (the header string and the numeric OHLCV
+// columns are left untouched). The values are real Excel dates, sortable and
+// usable in date arithmetic, not text.
 func (s *Service) YDH(ctx context.Context, ticker string, days int32) ([][]any, error) {
 	if days < 1 {
 		return nil, fmt.Errorf("days must be >= 1, got %d", days)
@@ -447,9 +449,10 @@ func (s *Service) YDH(ctx context.Context, ticker string, days int32) ([][]any, 
 			q.Close[i] == nil || q.Volume[i] == nil {
 			continue
 		}
-		// Emit the bar date as a real time.Time: xll-gen serializes it to an
-		// Excel date serial and auto-formats this column as yyyy-mm-dd at
-		// calc-end (value-driven — only this date column is formatted; the
+		// Emit the bar date as a real time.Time, keeping the market time-of-day
+		// (not normalized to midnight): xll-gen serializes it to an Excel
+		// date-time serial and auto-formats this column as yyyy-mm-dd hh:mm:ss
+		// at calc-end (value-driven — only this date column is formatted; the
 		// numeric OHLCV columns and the "Date" header string are left as-is).
 		date := time.Unix(ts, 0)
 		grid = append(grid, []any{

@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"math/rand"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xll-gen/sugar"
@@ -26,7 +26,14 @@ import (
 )
 
 // Service implements the generated XllService interface.
-type Service struct{}
+type Service struct {
+	// recalcMu guards the recalc-target location captured by BuildShowcaseSheet
+	// and read by OnRecalc. BuildShowcaseSheet runs on a command worker while
+	// OnRecalc runs on a server worker goroutine, so they race without it.
+	recalcMu    sync.Mutex
+	recalcSheet string
+	recalcRow   int
+}
 
 // ---------------------------------------------------------------------------
 // Worksheet functions
@@ -682,6 +689,20 @@ func (s *Service) BuildShowcaseSheet(ctx context.Context, cmd server.CommandCont
 			return err
 		}
 
+		// Capture the marker location for OnRecalc. Reading sheet.Name() here is
+		// safe: BuildShowcaseSheet runs as a COMMAND (STA is free), unlike the
+		// event handler, which must never touch COM (see OnRecalc). OnRecalc
+		// stamps the timestamp into column B at this row via generated.ScheduleSet,
+		// so it never needs to Find the marker at runtime.
+		sheetName, err := sheet.Name()
+		if err != nil {
+			return err
+		}
+		s.recalcMu.Lock()
+		s.recalcSheet = sheetName
+		s.recalcRow = recalcRow
+		s.recalcMu.Unlock()
+
 		// --- Live Market Data — Yahoo Finance (rtd-once) -----------------
 		//
 		// Placed well below everything else so the YDH spill (an OHLCV table,
@@ -849,32 +870,56 @@ func runExcelApp(name string, excelPID uint32, fn func(app excel.Application, sh
 // Events
 // ---------------------------------------------------------------------------
 
-// OnRecalc fires after every Excel calculation cycle (CalculationEnded). It
-// schedules a write of the recalc timestamp via the command-scheduling path so
-// the write happens on Excel's thread at a safe point.
+// OnRecalc fires after every Excel calculation cycle (CalculationEnded). The
+// XLL invokes this handler via a SYNCHRONOUS shm round-trip that BLOCKS Excel's
+// STA (main) thread until this returns. It must therefore do NO Excel COM
+// automation: any COM call (attach/Find/SetValue) needs the STA thread — which
+// is blocked waiting on this very handler — so it would deadlock until the
+// round-trip times out (~2s freeze on every recalc).
+//
+// Instead we enqueue a DEFERRED command via generated.ScheduleSet: the write is
+// returned in the round-trip response and executed by the XLL on the STA thread
+// AFTER this handler returns — no re-entrant COM, no deadlock. The target cell
+// (column B at the marker row on the showcase sheet) was captured by
+// BuildShowcaseSheet, so we never have to touch Excel to locate it here.
 func (s *Service) OnRecalc(ctx context.Context) error {
-	_ = sugar.Do(func(sctx sugar.Context) error {
-		// Events carry no CommandContext, but the Go server is launched as
-		// Excel's child, so the hosting Excel's PID is our parent PID — attach
-		// by it (same window-walk reason as the command handlers; the ROT is
-		// unreachable from this process).
-		app := attachExcel(sctx, uint32(os.Getppid()))
-		if err := app.Err(); err != nil {
-			return err
-		}
-		sheet := app.Books().Active().Sheets().Active()
-		// Find the marker cell written by BuildShowcaseSheet and stamp B next to it.
-		cell, found, err := sheet.UsedRange().Find("Last recalc (set by event handler):")
-		if err != nil || !found {
-			return err
-		}
-		row, err := cell.Row()
-		if err != nil {
-			return err
-		}
-		return sheet.Range(fmt.Sprintf("B%d", row)).
-			SetValue("recalc @ " + time.Now().Format("15:04:05")).Err()
-	})
+	s.recalcMu.Lock()
+	sheetName := s.recalcSheet
+	recalcRow := s.recalcRow
+	s.recalcMu.Unlock()
+
+	// BuildShowcaseSheet hasn't run yet (no marker cell): nothing to stamp.
+	if recalcRow == 0 {
+		return nil
+	}
+
+	// Target cell B{recalcRow}: 0-based row recalcRow-1, 0-based col 1.
+	b := flatbuffers.NewBuilder(0)
+	sOff := b.CreateString(sheetName)
+	protocol.RangeStartRefsVector(b, 1)
+	protocol.CreateRect(b, int32(recalcRow-1), int32(recalcRow-1), 1, 1)
+	refsOff := b.EndVector(1)
+	protocol.RangeStart(b)
+	protocol.RangeAddSheetName(b, sOff)
+	protocol.RangeAddRefs(b, refsOff)
+	rOff := protocol.RangeEnd(b)
+	b.Finish(rOff)
+	r := protocol.GetRootAsRange(b.FinishedBytes(), 0)
+
+	// Value: a STRING "recalc @ HH:MM:SS".
+	b2 := flatbuffers.NewBuilder(0)
+	strOff := b2.CreateString("recalc @ " + time.Now().Format("15:04:05"))
+	protocol.StrStart(b2)
+	protocol.StrAddVal(b2, strOff)
+	sValOff := protocol.StrEnd(b2)
+	protocol.AnyStart(b2)
+	protocol.AnyAddValType(b2, protocol.AnyValueStr)
+	protocol.AnyAddVal(b2, sValOff)
+	aOff := protocol.AnyEnd(b2)
+	b2.Finish(aOff)
+	v := protocol.GetRootAsAny(b2.FinishedBytes(), 0)
+
+	generated.ScheduleSet(r, v)
 	return nil
 }
 

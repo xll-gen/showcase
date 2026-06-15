@@ -404,6 +404,12 @@ func (s *Service) YDP(ctx context.Context, ticker, field string) (any, error) {
 // bar; Yahoo emits nulls for non-trading days (holidays) which are skipped. This
 // is the end-to-end demo of the rtd-once grid-spill feature: a non-blocking
 // network fetch whose result spills via the new guest->host grid path.
+//
+// The Date column is returned as a real time.Time, so xll-gen serializes it to
+// an Excel date serial and auto-formats the data cells as yyyy-mm-dd at
+// calc-end — value-driven, per-cell date formatting (the header string and the
+// numeric OHLCV columns are left untouched). The dates are real Excel dates,
+// sortable and usable in date arithmetic, not text.
 func (s *Service) YDH(ctx context.Context, ticker string, days int32) ([][]any, error) {
 	if days < 1 {
 		return nil, fmt.Errorf("days must be >= 1, got %d", days)
@@ -441,7 +447,11 @@ func (s *Service) YDH(ctx context.Context, ticker string, days int32) ([][]any, 
 			q.Close[i] == nil || q.Volume[i] == nil {
 			continue
 		}
-		date := time.Unix(ts, 0).Format("2006-01-02")
+		// Emit the bar date as a real time.Time: xll-gen serializes it to an
+		// Excel date serial and auto-formats this column as yyyy-mm-dd at
+		// calc-end (value-driven — only this date column is formatted; the
+		// numeric OHLCV columns and the "Date" header string are left as-is).
+		date := time.Unix(ts, 0)
 		grid = append(grid, []any{
 			date,
 			*q.Open[i], *q.High[i], *q.Low[i], *q.Close[i], *q.Volume[i],

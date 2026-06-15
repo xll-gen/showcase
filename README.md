@@ -109,6 +109,8 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | async | `SlowSquare(n int) -> int` (`mode: async`) | cell `=SlowSquare(9)`; ~1.5s then 81 |
 | RTD (`any` return) | `Clock() -> any` (`mode: rtd`) | cell `=Clock()`; ticks 1/s |
 | RTD with arg | `StockTick(symbol string) -> any` | cell `=StockTick("AAPL")`; wandering price |
+| rtd-once (network) | `YDP(ticker, field string) -> any` | cell `=YDP("AAPL","price")`; live Yahoo quote field |
+| rtd-once grid + date auto-format | `YDH(ticker string, days int) -> grid` | cell `=YDH("AAPL",30)`; spills an OHLCV history table. The **Date** column is returned as a real `time.Time`, so xll-gen serializes it to an Excel date serial and **auto-formats** those cells as `yyyy-mm-dd` (value-driven — the header string and numeric OHLCV columns stay as-is); the dates are sortable real Excel dates, not text |
 | command (sugar) | `BuildShowcaseSheet` | ribbon **Demo → Build Showcase Sheet** (large) |
 | command (sugar) | `ClearShowcase` | ribbon **Demo → Clear Showcase** |
 | command + shortcut | `WriteTimestamp` (`shortcut: T`) | ribbon **Commands** / **Ctrl+Shift+T** → writes A1 |

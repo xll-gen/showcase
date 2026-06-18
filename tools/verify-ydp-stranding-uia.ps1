@@ -40,12 +40,15 @@ Start-Sleep 3  # let xlAutoOpen launch the Go server + register RTD
 $ydpCells = @('A2','B2','C2','A3','B3','C3','A5')
 $everStuck = @()
 
-# Single connect-storm round by default: one workbook with the full burst is
-# the actual #GETTING_DATA repro scenario, and the per-topic log check is the
-# deterministic signal. (Multiple rounds via close+reopen can trip a SEPARATE,
-# pre-existing teardown crash when a live YDH rtd-once grid is torn down — see
-# the showcase RTD-crash notes — which is out of scope for this stranding check.)
-$rounds = 1
+# Multi-round connect-storm: each round is a fresh workbook with the full burst
+# (the #GETTING_DATA repro), and the per-topic log check is the deterministic
+# stranding signal. close+reopen across rounds ALSO exercises the RTD-server
+# teardown path: it used to trip a SEPARATE teardown crash when a live YDH
+# rtd-once grid was torn down (RtdServer::ServerTerminate ran the destructive
+# teardown on a mere workbook close → reopen hit a dead server, RPC 0x800706BA).
+# FIXED in xll-gen v0.8.10 (ServerTerminate gates the destructive teardown on a
+# confirmed host shutdown), so $rounds>=2 now doubles as that crash's regression.
+$rounds = 3
 for ($r = 1; $r -le $rounds; $r++) {
     Write-Output "--- burst round $r/$rounds (fresh workbook) ---"
     if (-not (Get-Process -Id $pidExcel -EA SilentlyContinue)) { Write-Output "  Excel process GONE before round $r"; break }

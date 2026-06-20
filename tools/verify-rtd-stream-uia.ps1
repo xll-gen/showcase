@@ -9,14 +9,14 @@
 # one value (the pre-fix bug). Also watches for a modal "not responding" dialog
 # and Process.Responding. Two-tier cleanup at the end.
 
+. "$PSScriptRoot\uia-common.ps1"
 $ErrorActionPreference = 'Continue'
-$xll = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\build\xll_showcase.xll")
+$xll = (Resolve-ShowcasePaths).Xll
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
 
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$AE = [Windows.Automation.AutomationElement]; $TS = [Windows.Automation.TreeScope]
+Initialize-Uia
 
-Get-Process EXCEL, xll_showcase -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Stop-ShowcaseProcesses
 Start-Sleep 1
 
 $app = New-Object -ComObject Excel.Application
@@ -72,12 +72,5 @@ $verdict = if ($dialog) { "FAIL (dialog: $dialog)" }
 Write-Output "VERDICT: $verdict"
 
 # Two-tier cleanup: graceful quit, then force-kill.
-try { $wb.Close($false) } catch {}
-try { $app.Quit() } catch {}
-try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ws) } catch {}
-try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($wb) } catch {}
-try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
-[GC]::Collect(); [GC]::WaitForPendingFinalizers()
-Start-Sleep 2
-Get-Process EXCEL, xll_showcase -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Stop-ShowcaseCom -App $app -Workbook $wb -Worksheet $ws
 Write-Output "cleaned up"

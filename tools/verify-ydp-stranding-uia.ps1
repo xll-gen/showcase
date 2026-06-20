@@ -19,13 +19,13 @@
 # handler push an ERROR STRING — which still SETTLES the cell (not #GETTING_DATA),
 # so it does not count as stranding. We only fail on #GETTING_DATA persistence.
 
+. "$PSScriptRoot\uia-common.ps1"
 $ErrorActionPreference = 'Continue'
-$xll = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\build\xll_showcase.xll")
-$goLog = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\build\xll_showcase_go.log")
+$P = Resolve-ShowcasePaths; $xll = $P.Xll; $goLog = $P.GoLog
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
 try { if (Test-Path $goLog) { Clear-Content $goLog -ErrorAction Stop } } catch { Write-Output "(could not clear ${goLog}: $_)" }
 
-Get-Process EXCEL, xll_showcase, go_server -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Stop-ShowcaseProcesses -IncludeGoServer
 Start-Sleep 1
 
 $app = New-Object -ComObject Excel.Application
@@ -100,9 +100,5 @@ Write-Output "Excel still alive: $excelAlive"
 Write-Output "VERDICT: $verdict"
 
 # Two-tier cleanup.
-try { $app.Quit() } catch {}
-try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($app) } catch {}
-[GC]::Collect(); [GC]::WaitForPendingFinalizers()
-Start-Sleep 2
-Get-Process EXCEL, xll_showcase, go_server -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Stop-ShowcaseCom -App $app -IncludeGoServer
 Write-Output "cleaned up"

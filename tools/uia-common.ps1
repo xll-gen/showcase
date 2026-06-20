@@ -1,0 +1,334 @@
+# uia-common.ps1 — shared scaffold for the showcase UIA repro/verify scripts.
+#
+# Dot-source this from a sibling script:   . "$PSScriptRoot\uia-common.ps1"
+#
+# It provides the common plumbing every showcase UIA driver needs:
+#   * XLL / build-dir / log path resolution         (Resolve-ShowcasePaths)
+#   * stale Excel/server process kill               (Stop-ShowcaseProcesses)
+#   * UIA bootstrap ($AE/$TS) + Restart-Manager lock probe (Initialize-Uia, Probe-Lock)
+#   * visible Excel window enumeration              (Get-ExcelWindows)
+#   * blank-workbook prep via a SHORT-LIVED COM client (New-ShowcaseWorkbook)
+#   * launch real Excel + wait for the ready window (Start-ShowcaseExcel / Wait-ShowcaseWindow)
+#   * select the showcase ribbon tab + click Build  (Invoke-RibbonButton / Invoke-BuildShowcase)
+#   * FAITHFUL window close via WindowPattern.Close()+Don't-Save (Close-ExcelWindowFaithful)
+#   * the project's mandatory TWO-TIER teardown      (Stop-ShowcaseProcesses for kill-only,
+#       Stop-ShowcaseCom for COM graceful-Quit -> force-kill)
+#
+# Each consuming script keeps only its own sampling/verdict logic.
+#
+# ----------------------------------------------------------------------------
+# ENCODING: this file is ASCII-ONLY on purpose. A .ps1 without a UTF-8 BOM is
+# read by Windows PowerShell under the system ANSI codepage (e.g. CP949 on
+# Korean Windows), which mangles any non-ASCII (Korean) literal into bytes that
+# either break parsing or form an INVALID regex whose exception is swallowed by
+# a surrounding try/catch -- which silently dropped the real Excel window and
+# produced "FAIL: no ready window". So localized strings (e.g. the Korean
+# "Don't Save" button) are built by codepoint, never as a source literal.
+# ----------------------------------------------------------------------------
+
+$xlexe = "C:\Program Files\Microsoft Office\Root\Office16\EXCEL.EXE"
+
+# --- path resolution --------------------------------------------------------
+# Resolves the built XLL, the build dir, and the two server logs relative to
+# the CALLING script's tools\ directory. Returns a hashtable; callers usually
+# splat into locals:  $P = Resolve-ShowcasePaths; $xll = $P.Xll
+function Resolve-ShowcasePaths {
+    $buildDir  = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\build")
+    [pscustomobject]@{
+        Xlexe     = $xlexe
+        Xll       = [System.IO.Path]::GetFullPath("$PSScriptRoot\..\build\xll_showcase.xll")
+        BuildDir  = $buildDir
+        GoLog     = Join-Path $buildDir "xll_showcase_go.log"
+        NativeLog = Join-Path $buildDir "xll_showcase_native.log"
+    }
+}
+
+# --- UIA bootstrap ----------------------------------------------------------
+# Loads the UIA assemblies and publishes $AE / $TS into the CALLER's scope
+# (script scope) so callers can use them exactly as before. Idempotent.
+function Initialize-Uia {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    Set-Variable -Name AE -Scope Script -Value ([Windows.Automation.AutomationElement])
+    Set-Variable -Name TS -Scope Script -Value ([Windows.Automation.TreeScope])
+}
+
+# --- Restart Manager: which process(es) hold a lock on $path ----------------
+Add-Type -Namespace RM -Name Locks -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+struct RM_UNIQUE_PROCESS { public int dwProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime; }
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+struct RM_PROCESS_INFO {
+  public RM_UNIQUE_PROCESS Process;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string strAppName;
+  [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)]  public string strServiceShortName;
+  public int ApplicationType; public uint AppStatus; public uint TSSessionId; [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+}
+[DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmStartSession(out uint h, int flags, string key);
+[DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
+[DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint h, uint nf, string[] f, uint na, IntPtr a, uint ns, string[] s);
+[DllImport("rstrtmgr.dll")] static extern int RmGetList(uint h, out uint needed, ref uint count, [In,Out] RM_PROCESS_INFO[] info, ref uint reasons);
+public static string Holders(string path) {
+  uint h; var key = Guid.NewGuid().ToString("N");
+  if (RmStartSession(out h, 0, key) != 0) return "(RM start failed)";
+  try {
+    if (RmRegisterResources(h, 1, new[]{path}, 0, IntPtr.Zero, 0, null) != 0) return "(RM register failed)";
+    uint needed = 0, count = 0, reasons = 0;
+    int rc = RmGetList(h, out needed, ref count, null, ref reasons);
+    if (needed == 0) return "(none)";
+    var arr = new RM_PROCESS_INFO[needed]; count = needed;
+    rc = RmGetList(h, out needed, ref count, arr, ref reasons);
+    if (rc != 0) return "(RM getlist rc=" + rc + ")";
+    var sb = new System.Text.StringBuilder();
+    for (int i=0;i<count;i++) sb.Append(arr[i].strAppName + " (pid=" + arr[i].Process.dwProcessId + ")  ");
+    return sb.ToString().Trim();
+  } finally { RmEndSession(h); }
+}
+'@
+
+function Probe-Lock([string]$path) {
+    if (-not (Test-Path $path)) { return "MISSING" }
+    try {
+        $fs = [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'None')  # exclusive
+        $fs.Close(); return "FREE (deletable)"
+    } catch {
+        return "LOCKED by -> " + [RM.Locks]::Holders($path)
+    }
+}
+
+# --- visible Excel window enumeration ---------------------------------------
+# Returns a (possibly empty) [System.Collections.ArrayList] of AutomationElement
+# top-level Excel windows. Using an explicit ArrayList (not PowerShell array
+# unrolling) keeps the return type stable whether 0, 1, or N windows match.
+#
+# Identifies the transient "Opening..." splash by ASCII-only means (the file is
+# ASCII-only -- see ENCODING note at top): the ready workbook window's title
+# contains the workbook file extension '.xlsx', the splash does not.
+#   -RequireWorkbook : match only the ready '<file>.xlsx - Excel' window
+#                      (acquisition); excludes the splash + the Start screen.
+#   (default)        : match ANY 'Excel' window EXCEPT the ASCII 'Opening'
+#                      splash (post-close ghost detection -- a lingering
+#                      windowless ghost has NO window, so any window counts).
+function Get-ExcelWindows {
+    param([switch]$RequireWorkbook)
+    $cond = New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
+    $all = $AE::RootElement.FindAll($TS::Children, $cond)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($w in $all) {
+        try {
+            $nm = $w.Current.Name
+            if ($nm -notmatch 'Excel') { continue }
+            if ($RequireWorkbook) {
+                if ($nm -match '\.xlsx') { [void]$out.Add($w) }   # ready workbook window only
+            } else {
+                if ($nm -notmatch 'Opening') { [void]$out.Add($w) }  # any Excel window, skip ASCII splash
+            }
+        } catch {}
+    }
+    return ,$out
+}
+
+# --- stale / final process kill (tier-2 of the two-tier teardown for the
+#     UIA-driven scripts that never hold a COM client) -----------------------
+# Kills EXCEL + the showcase Go server (and the legacy 'go_server' name when
+# -IncludeGoServer is set). Used both as the up-front stale-process sweep and
+# as the final force-kill tier.
+function Stop-ShowcaseProcesses {
+    param([switch]$IncludeGoServer)
+    $names = @('EXCEL', 'xll_showcase')
+    if ($IncludeGoServer) { $names += 'go_server' }
+    Get-Process $names -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+}
+
+# --- blank-workbook prep ----------------------------------------------------
+# A blank workbook is required: launching ONLY the .xll shows the Start screen,
+# from which the ribbon/Build flow is not reachable. We mint it with a
+# SHORT-LIVED COM client that is fully released + force-killed before the real
+# (COM-free) Excel launch -- a held COM client would mask the very bugs these
+# repros chase. Returns the temp .xlsx path.
+function New-ShowcaseWorkbook {
+    param([Parameter(Mandatory)][string]$Name)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) $Name
+    $c = New-Object -ComObject Excel.Application; $c.DisplayAlerts = $false
+    $b = $c.Workbooks.Add(); $b.SaveAs($tmp, 51); $b.Close($false); $c.Quit()
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($c)
+    Start-Sleep 2; Get-Process EXCEL -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; Start-Sleep 1
+    return $tmp
+}
+
+# --- launch real Excel (no held COM object) ---------------------------------
+# Opens the workbook + loads the XLL addin + ribbon, exactly as a user would by
+# double-clicking. Returns the Process object (caller reads .Id).
+function Start-ShowcaseExcel {
+    param([Parameter(Mandatory)][string]$Workbook, [Parameter(Mandatory)][string]$Xll)
+    return Start-Process $xlexe -ArgumentList "`"$Workbook`"", "`"$Xll`"" -PassThru
+}
+
+# --- wait for the ready Excel window ----------------------------------------
+# Polls UIA for the ready workbook window. EXCEL.EXE can relaunch off a pid
+# different from Start-Process's, so we match on the workbook title via
+# Get-ExcelWindows -RequireWorkbook and report the window-owning pid back
+# through [ref]$ResolvedPid (seeded with the launched pid as a fallback).
+#   -SettleFirst <s> : sleep before the first poll (the COM-bounce variant
+#                      makes Excel slow to materialize, and polling UIA too
+#                      eagerly during init can transiently throw on Current.Name).
+# Returns the AutomationElement window, or $null on timeout.
+function Wait-ShowcaseWindow {
+    param(
+        [int]$LaunchedPid = 0,
+        [ref]$ResolvedPid,
+        [int]$SettleFirst = 0,
+        [int]$Tries = 38,
+        [int]$IntervalMs = 800
+    )
+    if ($SettleFirst -gt 0) { Start-Sleep $SettleFirst }
+    if ($ResolvedPid) { $ResolvedPid.Value = $LaunchedPid }
+    for ($i = 0; $i -lt $Tries; $i++) {
+        $cands = Get-ExcelWindows -RequireWorkbook
+        if ($cands.Count -gt 0) {
+            $w = $cands[0]
+            if ($ResolvedPid) { try { $ResolvedPid.Value = $w.Current.ProcessId } catch {} }
+            return $w
+        }
+        Start-Sleep -Milliseconds $IntervalMs
+    }
+    return $null
+}
+
+# --- select showcase ribbon tab + invoke a button ---------------------------
+# Selecting the custom ribbon tab is what brings its buttons into the UIA tree;
+# only then can the button be Invoked. Returns $true if a matching button was
+# invoked. $NamePattern is matched (regex) against button names.
+function Invoke-RibbonButton {
+    param(
+        [Parameter(Mandatory)]$Window,
+        [Parameter(Mandatory)][string]$NamePattern,
+        [string]$Tab = 'xll-gen Showcase'
+    )
+    $tabCond = New-Object Windows.Automation.AndCondition(@(
+        (New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::TabItem)),
+        (New-Object Windows.Automation.PropertyCondition($AE::NameProperty, $Tab)) ))
+    $tabEl = $Window.FindFirst($TS::Descendants, $tabCond)
+    if ($tabEl) { try { $tabEl.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select(); Start-Sleep 1 } catch {} }
+    $btnCond = New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
+    foreach ($bn in $Window.FindAll($TS::Descendants, $btnCond)) {
+        try {
+            if ($bn.Current.Name -match $NamePattern) {
+                $bn.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+                return $true
+            }
+        } catch {}
+    }
+    return $false
+}
+
+# --- FAITHFUL window close --------------------------------------------------
+# Drives the REAL window close via UIA WindowPattern.Close() (a user clicking X)
+# and dismisses the "Save changes? -> Don't Save" prompt -- NOT a COM
+# Application.Quit (which would mask the close-time bugs by tearing RTD down on
+# a different code path). The Korean "Don't Save" button is matched by codepoint
+# (U+C800 U+C7A5), never as a source literal (see ENCODING note at top); a
+# keyboard 'n' / Alt+F4 escalation also dismisses lingering windows.
+#   -Escalate : if a top-level Excel window still lingers after Close()+Don't-Save,
+#               escalate to a FAITHFUL Alt+F4 on the foreground Excel window
+#               (still a user "close window" gesture, NOT COM Quit). Some
+#               environments leave the app frame running after the workbook
+#               window closes (no quit -> no teardown -> inconclusive run).
+function Close-ExcelWindowFaithful {
+    param([Parameter(Mandatory)]$Window, [switch]$Escalate)
+    $btnCond = New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
+    $dontSaveKR = [string][char]0xC800 + [string][char]0xC7A5  # localized "Don't Save" prefix
+
+    Write-Output "--- closing window via UIA (faithful WindowPattern.Close) ---"
+    try { $Window.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close() } catch { Write-Output "close pattern failed: $_" }
+
+    # Dismiss the "Save changes? -> Don't Save" prompt.
+    for ($i = 0; $i -lt 12; $i++) {
+        Start-Sleep -Milliseconds 500
+        $dlgBtn = $null
+        foreach ($w in (Get-ExcelWindows)) {
+            foreach ($bn in $w.FindAll($TS::Descendants, $btnCond)) {
+                try {
+                    $bnm = $bn.Current.Name
+                    if (($bnm -match 'Do.{0,2}n.?t Save') -or ($bnm -like ('*'+$dontSaveKR+'*'))) { $dlgBtn = $bn; break }
+                } catch {}
+            }
+            if ($dlgBtn) { break }
+        }
+        if ($dlgBtn) { try { $dlgBtn.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke(); Write-Output "clicked Don't-Save" } catch {}; break }
+    }
+    # Keyboard fallback: if a save dialog is still up, press 'N' (Don't Save accelerator).
+    foreach ($w in (Get-ExcelWindows)) {
+        $hasDialog = $false
+        foreach ($bn in $w.FindAll($TS::Descendants, $btnCond)) {
+            try { if ($bn.Current.Name -match 'Save|Cancel') { $hasDialog = $true; break } } catch {}
+        }
+        if ($hasDialog) {
+            try { $shell = New-Object -ComObject WScript.Shell; $shell.SendKeys('n'); Write-Output "sent 'n' (Don't-Save accelerator)" } catch {}
+            break
+        }
+    }
+
+    if (-not $Escalate) { return }
+
+    # Faithful-close fallback. In some environments WindowPattern.Close() on the
+    # workbook window dismisses the document but leaves the Excel application
+    # frame running (no quit -> no OnBeginShutdown/OnDisconnection -> teardown
+    # never fires and the run is inconclusive). If a top-level Excel window is
+    # still present a moment later, escalate to Alt+F4 on the foreground Excel
+    # window. Alt+F4 is a FAITHFUL user "close the window" gesture (NOT COM
+    # Application.Quit, which would mask the S1' bug). We only do this when a
+    # window lingers, so genuine clean closes are unaffected.
+    Start-Sleep -Milliseconds 800
+    $lingering = Get-ExcelWindows
+    if ($lingering.Count -gt 0) {
+        Write-Output "--- window still present after Close(); escalating to faithful Alt+F4 ---"
+        for ($k = 0; $k -lt 5; $k++) {
+            $cur = Get-ExcelWindows
+            if ($cur.Count -eq 0) { break }
+            try {
+                $w = $cur[0]
+                try { $w.SetFocus() } catch {}
+                Start-Sleep -Milliseconds 200
+                $shell = New-Object -ComObject WScript.Shell
+                $shell.SendKeys('%{F4}')
+                Write-Output "sent Alt+F4"
+            } catch { Write-Output "Alt+F4 failed: $_" }
+            Start-Sleep -Milliseconds 600
+            foreach ($w in (Get-ExcelWindows)) {
+                foreach ($bn in $w.FindAll($TS::Descendants, $btnCond)) {
+                    try {
+                        $bnm = $bn.Current.Name
+                        if (($bnm -match 'Do.{0,2}n.?t Save') -or ($bnm -like ('*'+$dontSaveKR+'*'))) {
+                            $bn.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+                            Write-Output "clicked Don't-Save (post Alt+F4)"
+                        }
+                    } catch {}
+                }
+            }
+            Start-Sleep -Milliseconds 600
+        }
+    }
+}
+
+# --- TWO-TIER teardown for COM-driven scripts -------------------------------
+# PROJECT-MANDATORY two-tier cleanup: FIRST attempt a graceful exit (close the
+# workbook + Application.Quit + release the COM RCWs so Excel can shut down on
+# its own code path), THEN force-kill any survivor. Never replace this with a
+# bare defer or a force-kill alone -- the graceful tier exercises the real
+# teardown path the bugs live on; the force-kill tier only guarantees the test
+# host is clean afterward.
+#   -App / -Workbook / -Worksheet : the COM RCWs to release (any may be $null).
+#   -IncludeGoServer              : also kill the legacy 'go_server' process.
+function Stop-ShowcaseCom {
+    param($App, $Workbook, $Worksheet, [switch]$IncludeGoServer)
+    # tier 1: graceful
+    if ($Workbook)  { try { $Workbook.Close($false) } catch {} }
+    if ($App)       { try { $App.Quit() } catch {} }
+    if ($Worksheet) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($Worksheet) } catch {} }
+    if ($Workbook)  { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($Workbook) } catch {} }
+    if ($App)       { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($App) } catch {} }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    Start-Sleep 2
+    # tier 2: force-kill any survivor
+    Stop-ShowcaseProcesses -IncludeGoServer:$IncludeGoServer
+}

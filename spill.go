@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"time"
 
-	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/xll-gen/types/go/protocol"
 )
 
@@ -47,43 +46,20 @@ func (s *Service) TimesTable(ctx context.Context, n int32) ([][]float64, error) 
 func (s *Service) StatsGrid(ctx context.Context, g *protocol.Grid) ([][]any, error) {
 	var count int
 	var sum, min, max float64
-	if g != nil {
-		var cell protocol.Scalar
-		for i := 0; i < g.DataLength(); i++ {
-			if !g.Data(&cell, i) {
-				continue
+	rangeNumericCells(g, func(v float64) {
+		if count == 0 {
+			min, max = v, v
+		} else {
+			if v < min {
+				min = v
 			}
-			var tbl flatbuffers.Table
-			if !cell.Val(&tbl) {
-				continue
+			if v > max {
+				max = v
 			}
-			var v float64
-			switch cell.ValType() {
-			case protocol.ScalarValueNum:
-				var num protocol.Num
-				num.Init(tbl.Bytes, tbl.Pos)
-				v = num.Val()
-			case protocol.ScalarValueInt:
-				var iv protocol.Int
-				iv.Init(tbl.Bytes, tbl.Pos)
-				v = float64(iv.Val())
-			default:
-				continue
-			}
-			if count == 0 {
-				min, max = v, v
-			} else {
-				if v < min {
-					min = v
-				}
-				if v > max {
-					max = v
-				}
-			}
-			sum += v
-			count++
 		}
-	}
+		sum += v
+		count++
+	})
 	var mean float64
 	if count > 0 {
 		mean = sum / float64(count)

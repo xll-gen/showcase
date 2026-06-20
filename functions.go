@@ -66,12 +66,15 @@ func (s *Service) EchoAny(ctx context.Context, v *protocol.Any) (any, error) {
 	return nil, nil
 }
 
-// SumGrid sums every numeric cell in the incoming grid (grid -> float).
-func (s *Service) SumGrid(ctx context.Context, g *protocol.Grid) (float64, error) {
+// rangeNumericCells invokes fn for every numeric (Int or Num) cell of g,
+// decoding the raw FlatBuffers Scalar union once. Non-numeric, empty, or
+// unreadable cells are skipped; a nil grid yields no calls. This is the one
+// place the showcase touches the on-wire grid encoding — SumGrid and StatsGrid
+// both consume grids through it rather than re-walking the union.
+func rangeNumericCells(g *protocol.Grid, fn func(v float64)) {
 	if g == nil {
-		return 0, nil
+		return
 	}
-	var total float64
 	var cell protocol.Scalar
 	for i := 0; i < g.DataLength(); i++ {
 		if !g.Data(&cell, i) {
@@ -85,12 +88,18 @@ func (s *Service) SumGrid(ctx context.Context, g *protocol.Grid) (float64, error
 		case protocol.ScalarValueNum:
 			var num protocol.Num
 			num.Init(tbl.Bytes, tbl.Pos)
-			total += num.Val()
+			fn(num.Val())
 		case protocol.ScalarValueInt:
 			var iv protocol.Int
 			iv.Init(tbl.Bytes, tbl.Pos)
-			total += float64(iv.Val())
+			fn(float64(iv.Val()))
 		}
 	}
+}
+
+// SumGrid sums every numeric cell in the incoming grid (grid -> float).
+func (s *Service) SumGrid(ctx context.Context, g *protocol.Grid) (float64, error) {
+	var total float64
+	rangeNumericCells(g, func(v float64) { total += v })
 	return total, nil
 }

@@ -10,3 +10,7 @@ temp_*/
 
 # Logs emitted next to the .xll (logging.dir = ${XLL_DIR})
 *.log
+
+# Vendored Go modules (archived in vendor.tar.gz)
+vendor/
+vendor.tar.gz

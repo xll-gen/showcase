@@ -33,6 +33,9 @@ $ErrorActionPreference = 'Continue'
 $P = Resolve-ShowcasePaths
 $xll = $P.Xll; $goLog = $P.GoLog; $nativeLog = $P.NativeLog
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
+# Environment before product: an unmet Trust Center lever produces this
+# script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
+Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
 
 foreach ($l in @($goLog, $nativeLog)) {
     try { if (Test-Path $l) { Clear-Content $l -ErrorAction Stop } } catch { Write-Output "(could not clear ${l}: $_)" }

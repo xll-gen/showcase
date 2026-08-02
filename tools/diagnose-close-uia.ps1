@@ -22,6 +22,9 @@ $xll = $P.Xll; $goLog = $P.GoLog; $nativeLog = $P.NativeLog
 Initialize-Uia
 
 Write-Output "=== diagnose-close-uia : XLL=$xll ==="
+# Environment before product: an unmet Trust Center lever produces this
+# script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
+Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
 Stop-ShowcaseProcesses
 Start-Sleep 1
 

@@ -13,6 +13,9 @@
 $ErrorActionPreference = 'Continue'
 $xll = (Resolve-ShowcasePaths).Xll
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
+# Environment before product: an unmet Trust Center lever produces this
+# script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
+Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
 
 Initialize-Uia
 

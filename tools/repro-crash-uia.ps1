@@ -15,6 +15,9 @@
 
 . "$PSScriptRoot\uia-common.ps1"
 $P = Resolve-ShowcasePaths; $xll = $P.Xll
+# Environment before product: an unmet Trust Center lever produces this
+# script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
+Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
 Initialize-Uia
 
 Stop-ShowcaseProcesses

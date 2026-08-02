@@ -4,6 +4,9 @@
 #
 # It provides the common plumbing every showcase UIA driver needs:
 #   * XLL / build-dir / log path resolution         (Resolve-ShowcasePaths)
+#   * Trust Center precondition gate                (Assert-ExcelTrustPreconditions,
+#       Test-ExcelTrustedLocation, Clear-ExcelResiliency) -- call it FIRST; an
+#       unmet lever fakes the very defects these scripts hunt
 #   * stale Excel/server process kill               (Stop-ShowcaseProcesses)
 #   * UIA bootstrap ($AE/$TS) + Restart-Manager lock probe (Initialize-Uia, Probe-Lock)
 #   * visible Excel window enumeration              (Get-ExcelWindows)
@@ -40,6 +43,127 @@ function Resolve-ShowcasePaths {
         BuildDir  = $buildDir
         GoLog     = Join-Path $buildDir "xll_showcase_go.log"
         NativeLog = Join-Path $buildDir "xll_showcase_native.log"
+    }
+}
+
+# --- Trust Center preconditions ---------------------------------------------
+# WHY THIS EXISTS: every one of these scripts reports "the product is broken"
+# using symptoms that an unmet Trust Center precondition produces IDENTICALLY.
+# Three DIFFERENT levers govern three DIFFERENT things, and 2026-07-29 hit all
+# three in sequence while blaming the XLL:
+#
+#   (1) Trusted Locations\LocationN (Path + AllowSubfolders)
+#         governs whether the file/add-in is trusted at all. It ALSO exempts an
+#         UNSIGNED XLL from the signature requirement below -- verified: with
+#         RequireAddinSig=1 the showcase still loaded, because a trusted
+#         location covered build\.
+#   (2) DataConnectionWarnings
+#         governs the RTD / external-data prompt. A trusted location does NOT
+#         suppress it -- Excel treats RTD as a separate category. If it is not
+#         0 a MODAL dialog appears, the driver polls forever behind it, and the
+#         run is read as "RTD wedged" (same misdiagnosis shape as the .Text
+#         trap).
+#   (3) RequireAddinSig
+#         if 1 AND the XLL is not covered by a trusted location, Excel blocks
+#         the unsigned add-in with NO dialog and NO warning. This one is the
+#         most dangerous: the only symptom is "Excel is up but there is no
+#         server process", which reads exactly like a product defect.
+#
+# So: READ all three, decide against the ACTUAL xll path, and FAIL LOUDLY.
+# This function deliberately does NOT write to the registry -- changing a
+# user's security settings is theirs to do; we print the exact remediation.
+#
+# Returns nothing on success. Throws on an unmet precondition, so a caller that
+# ignores the result still stops instead of proceeding into a bogus verdict.
+#   -XllPath      : the .xll actually being loaded (its FOLDER is what matters).
+#   -RequireRtd   : also enforce DataConnectionWarnings=0 (any script that waits
+#                   on RTD topics; harmless to pass always).
+$ExcelSecurityKey = 'HKCU:\Software\Microsoft\Office\16.0\Excel\Security'
+
+function Test-ExcelTrustedLocation {
+    param([Parameter(Mandatory)][string]$Folder)
+    $root = Join-Path $ExcelSecurityKey 'Trusted Locations'
+    if (-not (Test-Path $root)) { return $false }
+    $target = [System.IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
+    foreach ($k in (Get-ChildItem $root -EA SilentlyContinue)) {
+        $p = (Get-ItemProperty $k.PSPath -EA SilentlyContinue)
+        if (-not $p -or -not $p.Path) { continue }
+        # Path values routinely contain %USERPROFILE% and friends.
+        $loc = [Environment]::ExpandEnvironmentVariables([string]$p.Path)
+        try { $loc = [System.IO.Path]::GetFullPath($loc) } catch { continue }
+        $loc = $loc.TrimEnd('\') + '\'
+        if ($target -eq $loc) { return $true }
+        if ($p.AllowSubfolders -eq 1 -and $target.StartsWith($loc, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Assert-ExcelTrustPreconditions {
+    param([Parameter(Mandatory)][string]$XllPath, [switch]$RequireRtd)
+
+    $folder  = Split-Path -Parent ([System.IO.Path]::GetFullPath($XllPath))
+    $sec     = Get-ItemProperty $ExcelSecurityKey -EA SilentlyContinue
+    $sig     = if ($sec -and $null -ne $sec.RequireAddinSig)         { [int]$sec.RequireAddinSig }         else { 0 }
+    $dcw     = if ($sec -and $null -ne $sec.DataConnectionWarnings)  { [int]$sec.DataConnectionWarnings }  else { 1 }
+    $trusted = Test-ExcelTrustedLocation -Folder $folder
+
+    Write-Output ("PRECHECK: xll folder      = {0}" -f $folder)
+    Write-Output ("PRECHECK: trusted location= {0}" -f $trusted)
+    Write-Output ("PRECHECK: RequireAddinSig = {0}" -f $sig)
+    Write-Output ("PRECHECK: DataConnWarnings= {0}" -f $dcw)
+
+    $fail = @()
+    if ($sig -eq 1 -and -not $trusted) {
+        $fail += ("RequireAddinSig=1 and '{0}' is NOT a trusted location. Excel will block the UNSIGNED showcase XLL " -f $folder) +
+                 "SILENTLY (no dialog, no log, no server process). Fix: add the folder as a Trusted Location " +
+                 ("(New-Item '{0}\Trusted Locations\LocationXLLGen' -Force; " -f $ExcelSecurityKey) +
+                 ("Set-ItemProperty '{0}\Trusted Locations\LocationXLLGen' Path '{1}'; " -f $ExcelSecurityKey, $folder) +
+                 ("Set-ItemProperty '{0}\Trusted Locations\LocationXLLGen' AllowSubfolders 1)  -- or set RequireAddinSig=0." -f $ExcelSecurityKey)
+    }
+    if ($RequireRtd -and $dcw -ne 0) {
+        $fail += ("DataConnectionWarnings={0} (need 0). Excel will raise a MODAL external-data prompt for the RTD " -f $dcw) +
+                 "topics; the driver then polls behind it and the run is misread as 'RTD wedged'. A trusted location " +
+                 ("does NOT cover this. Fix: Set-ItemProperty '{0}' DataConnectionWarnings 0 -Type DWord." -f $ExcelSecurityKey)
+    }
+    if (-not $trusted) {
+        Write-Output ("PRECHECK: WARN - '{0}' is not a trusted location; the add-in may prompt or load degraded." -f $folder)
+    }
+
+    # Post-crash residue. DisabledItems is the other silent "add-in did not
+    # load" cause, and a pending DocumentRecovery makes Excel open the recovery
+    # pane, which steals the window the UIA driver is waiting for (3 of 5 runs
+    # on 2026-07-29). Both are REPORTED, not cleared -- DocumentRecovery can
+    # hold a real user's unsaved work, so clearing it is the caller's explicit
+    # choice via Clear-ExcelResiliency.
+    $res = Join-Path (Split-Path -Parent $ExcelSecurityKey) 'Resiliency'
+    foreach ($sub in @('DisabledItems', 'StartupItems', 'DocumentRecovery')) {
+        $p = Join-Path $res $sub
+        if (Test-Path $p) {
+            $k = Get-Item $p
+            $n = $k.ValueCount + $k.SubKeyCount
+            if ($n -gt 0) {
+                Write-Output ("PRECHECK: WARN - Resiliency\{0} has {1} entries. It can block the add-in or hijack the window the driver waits for; run Clear-ExcelResiliency to drop them." -f $sub, $n)
+            }
+        }
+    }
+
+    if ($fail.Count -gt 0) {
+        foreach ($f in $fail) { Write-Output ("PRECHECK FAIL: " + $f) }
+        throw "Excel Trust Center preconditions not met -- refusing to run (see PRECHECK FAIL above). These are ENVIRONMENT problems; do not record them as product defects."
+    }
+    Write-Output "PRECHECK: OK"
+}
+
+# Drops post-crash Excel resiliency residue. Opt-in on purpose: DocumentRecovery
+# may hold a real user's unsaved workbooks.
+function Clear-ExcelResiliency {
+    param([switch]$IncludeDocumentRecovery)
+    $res = Join-Path (Split-Path -Parent $ExcelSecurityKey) 'Resiliency'
+    $subs = @('DisabledItems', 'StartupItems')
+    if ($IncludeDocumentRecovery) { $subs += 'DocumentRecovery' }
+    foreach ($sub in $subs) {
+        $p = Join-Path $res $sub
+        if (Test-Path $p) { Remove-Item $p -Recurse -Force -EA SilentlyContinue; Write-Output ("cleared Resiliency\{0}" -f $sub) }
     }
 }
 

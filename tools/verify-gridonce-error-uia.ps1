@@ -81,14 +81,9 @@ function Wait-Settled($ws, [string]$addr, [int]$timeoutSec = 45) {
     try { return [string]$ws.Range($addr).Text } catch { return '' }
 }
 
-# Set-Formula enters a formula the way a USER of this Excel would. On a
-# dynamic-array build that means .Formula2: writing through .Formula instead
-# applies implicit intersection (an invisible leading @), which is not what the
-# user typed and which suppresses spilling. $hasDA is decided by the probe in
-# the body before the first call.
-function Set-Formula($ws, [string]$addr, [string]$f) {
-    if ($script:hasDA) { $ws.Range($addr).Formula2 = $f } else { $ws.Range($addr).Formula = $f }
-}
+# Set-Formula and Test-DynamicArrays are shared in uia-common.ps1 (both this
+# script and verify-ydp-stranding-uia.ps1 need the spill path, and having two
+# copies is how one of them drifted onto .Formula unnoticed).
 
 # Count the native-log WARN the grid-once error branch emits. This is what
 # distinguishes "handler ran again" from "cache served the stored error".
@@ -109,32 +104,11 @@ try {
     $wb = $app.Workbooks.Add()
     $ws = $wb.Worksheets.Item(1)
 
-    # Does this Excel have the dynamic-array engine?
-    #
-    # The probe MUST write through .Formula2, and this is the whole subtlety:
-    # on a DA build, .Formula applies IMPLICIT INTERSECTION, so '=SEQUENCE(3,3)'
-    # assigned via .Formula silently becomes '@SEQUENCE(3,3)' and paints a lone
-    # 1 — indistinguishable at a glance from a pre-DA build that cannot spill at
-    # all. Reading that as "no dynamic arrays" is wrong, and it then hides
-    # whether OUR grid returns spill. (The tell that it is not really a pre-DA
-    # build: a pre-DA Excel has no SEQUENCE at all and would answer #NAME?.)
-    # .Formula2 does not exist before the DA engine, so a throw here is the
-    # honest pre-DA signal; that case falls back to legacy CSE over a
-    # pre-selected range, which is how xll.yaml documents entering a grid there.
-    $script:hasDA = $false
-    try {
-        $ws.Range("Z1").Formula2 = '=SEQUENCE(2,2)'
-        Start-Sleep 1
-        $script:hasDA = ($null -ne $ws.Range("AA1").Value2)
-    } catch {
-        Write-Output "  (.Formula2 unavailable: $($_.Exception.Message))"
-    }
-    $ws.Range("Z1:AA2").ClearContents()
-    Write-Output "dynamic arrays: $(if ($hasDA) { 'available — entering the grid via .Formula2' } else { 'NOT available (pre-DA build) — using legacy CSE for the grid check' })"
+    Test-DynamicArrays -Worksheet $ws
 
     # --- 1. the error reaches the cell -------------------------------------
     Write-Output "[1] grid rtd-once handler error must PAINT, not wedge"
-    Set-Formula $ws "A1" '=YDH("MSFT",0)'
+    Set-Formula -Worksheet $ws -Address "A1" -Formula '=YDH("MSFT",0)'
     $t1 = Wait-Settled $ws "A1"
     Write-Output "    A1 settled to: '$t1'"
     if (Test-Pending $ws "A1") {
@@ -151,7 +125,7 @@ try {
     # second call would be a cache hit and the handler would NOT run again.
     Write-Output "[2] identical args later must re-run the handler (error is transient, not memoized)"
     Start-Sleep 2
-    Set-Formula $ws "A10" '=YDH("MSFT",0)'
+    Set-Formula -Worksheet $ws -Address "A10" -Formula '=YDH("MSFT",0)'
     $t2 = Wait-Settled $ws "A10"
     Write-Output "    A10 settled to: '$t2'"
     $afterSecond = Count-HandlerFailures
@@ -197,7 +171,7 @@ try {
     $before4 = Count-HandlerFailures
     $ws.Range("A1").ClearContents()
     Start-Sleep 2
-    Set-Formula $ws "A1" '=YDH("MSFT",0)'
+    Set-Formula -Worksheet $ws -Address "A1" -Formula '=YDH("MSFT",0)'
     $t4 = Wait-Settled $ws "A1"
     $after4 = Count-HandlerFailures
     Write-Output "    A1 settled to: '$t4' (handler failures $before4 -> $after4)"

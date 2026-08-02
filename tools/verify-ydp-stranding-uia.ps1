@@ -68,7 +68,15 @@ for ($r = 1; $r -le $rounds; $r++) {
     $ws.Range('A3').Formula = '=YDP("MSFT","price")'
     $ws.Range('B3').Formula = '=YDP("GOOG","price")'
     $ws.Range('C3').Formula = '=YDP("TSLA","price")'
-    $ws.Range('A5').Formula = '=YDH("MSFT",30)'
+    # The YDH GRID must go in through the spill path, which on a dynamic-array
+    # Excel means .Formula2. Written through .Formula it becomes '=@YDH(...)'
+    # by implicit intersection and takes the SINGLE-CELL variant instead --
+    # so this script claimed to cover 'a YDH grid survives the connect storm'
+    # while never exercising the guest->host grid shipment or the RTD recalc
+    # spill at all (2026-08-02). Test-DynamicArrays/Set-Formula are shared in
+    # uia-common.ps1 for exactly this reason.
+    if ($r -eq 1) { Test-DynamicArrays -Worksheet $ws }
+    Set-Formula -Worksheet $ws -Address 'A5' -Formula '=YDH("MSFT",30)'
 
     Start-Sleep 7  # settle window for the network fetch + push
     $stuck = @()

@@ -456,3 +456,48 @@ function Stop-ShowcaseCom {
     # tier 2: force-kill any survivor
     Stop-ShowcaseProcesses -IncludeGoServer:$IncludeGoServer
 }
+
+# --- entering a formula the way a USER would --------------------------------
+# WHY THIS IS SHARED. On a dynamic-array Excel, writing a grid formula through
+# .Formula applies IMPLICIT INTERSECTION -- an invisible leading @ -- so
+# '=YDH("MSFT",30)' silently becomes '=@YDH("MSFT",30)' and the cell takes the
+# SINGLE-CELL path. A script that does that while claiming to test the grid
+# spill path is testing something else and cannot fail for the reason it says.
+# verify-ydp-stranding-uia.ps1 did exactly that until 2026-08-02.
+#
+# The probe MUST itself write through .Formula2, and that is the whole subtlety:
+# probing with .Formula makes '=SEQUENCE(2,2)' paint a lone 1, which is
+# indistinguishable at a glance from a pre-DA Excel that cannot spill at all --
+# and reading that as "no dynamic arrays" then hides whether OUR grid spills.
+# (The tell that it is not really pre-DA: a pre-DA Excel has no SEQUENCE and
+# answers #NAME?.) .Formula2 does not exist before the DA engine, so a throw is
+# the honest pre-DA signal.
+#
+# Publishes $script:hasDA into the CALLER's scope, the way Initialize-Uia
+# publishes $AE/$TS. Returns $true when dynamic arrays are available.
+function Test-DynamicArrays {
+    param([Parameter(Mandatory)]$Worksheet)
+    $da = $false
+    try {
+        $Worksheet.Range("Z1").Formula2 = '=SEQUENCE(2,2)'
+        Start-Sleep 1
+        $da = ($null -ne $Worksheet.Range("AA1").Value2)
+    } catch {
+        Write-Output "  (.Formula2 unavailable: $($_.Exception.Message))"
+    }
+    try { $Worksheet.Range("Z1:AA2").ClearContents() } catch {}
+    Set-Variable -Name hasDA -Scope Script -Value $da
+    # Deliberately returns NOTHING. Write-Output shares the pipeline with the
+    # return value, so a caller writing [void](Test-DynamicArrays ...) to discard
+    # a bool would swallow this diagnostic line with it -- and the diagnostic is
+    # the only way to see which path the grid actually took. Callers read $hasDA.
+    Write-Output ("dynamic arrays: " + $(if ($da) { 'available - entering grids via .Formula2' } else { 'NOT available (pre-DA build) - grids need legacy CSE' }))
+}
+
+# Enters a formula through the API that matches this Excel. Call
+# Test-DynamicArrays once first.
+function Set-Formula {
+    param([Parameter(Mandatory)]$Worksheet, [Parameter(Mandatory)][string]$Address, [Parameter(Mandatory)][string]$Formula)
+    if ($script:hasDA) { $Worksheet.Range($Address).Formula2 = $Formula }
+    else { $Worksheet.Range($Address).Formula = $Formula }
+}

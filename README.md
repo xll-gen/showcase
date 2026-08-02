@@ -110,7 +110,7 @@ Showcase Sheet** the live cells appear in column B of the demo worksheet.
 | RTD (`any` return) | `Clock() -> any` (`mode: rtd`) | cell `=Clock()`; ticks 1/s |
 | RTD with arg | `StockTick(symbol string) -> any` | cell `=StockTick("AAPL")`; wandering price |
 | rtd-once (network) | `YDP(ticker, field string) -> any` | cell `=YDP("AAPL","price")`; live Yahoo quote field |
-| rtd-once grid + date auto-format | `YDH(ticker string, days int) -> grid` | cell `=YDH("AAPL",30)`; spills an OHLCV history table. The **Date** column is returned as a real `time.Time`, so xll-gen serializes it to an Excel date serial and **auto-formats** those cells as `yyyy-mm-dd` (value-driven — the header string and numeric OHLCV columns stay as-is); the dates are sortable real Excel dates, not text |
+| rtd-once grid + date auto-format | `YDH(ticker string, days int) -> grid` | cell `=YDH("AAPL",30)`; spills an OHLCV history table. The **Date** column is returned as a real `time.Time`, so xll-gen serializes it to an Excel date serial and **auto-formats** those cells as a real date (value-driven — the header string and numeric OHLCV columns stay as-is); the dates are sortable real Excel dates, not text. Measured 2026-07-29: the rendered cells read `2026-06-29 22:30:00`, i.e. date **and time** -- the handler returns an intraday timestamp, so the applied format is not the bare `yyyy-mm-dd` this table used to promise |
 | command (sugar) | `BuildShowcaseSheet` | ribbon **Demo → Build Showcase Sheet** (large) |
 | command (sugar) | `ClearShowcase` | ribbon **Demo → Clear Showcase** |
 | command + shortcut | `WriteTimestamp` (`shortcut: T`) | ribbon **Commands** / **Ctrl+Shift+T** → writes A1 |

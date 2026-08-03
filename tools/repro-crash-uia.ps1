@@ -18,6 +18,13 @@ $P = Resolve-ShowcasePaths; $xll = $P.Xll
 # Environment before product: an unmet Trust Center lever produces this
 # script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
 Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
+# Drop post-crash resiliency residue BEFORE launching. DisabledItems and
+# StartupItems are pure harness debris -- a previous crashed run can leave the
+# add-in on Excel's disabled list, and then this script measures an add-in that
+# was never loaded and blames the product. DocumentRecovery is deliberately NOT
+# touched (it can hold a real user's unsaved workbooks); the gate above WARNs
+# about it and leaves the choice to a human.
+Clear-ExcelResiliency
 Initialize-Uia
 
 Stop-ShowcaseProcesses

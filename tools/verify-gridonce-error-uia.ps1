@@ -36,6 +36,13 @@ if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
 # Environment before product: an unmet Trust Center lever produces this
 # script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
 Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
+# Drop post-crash resiliency residue BEFORE launching. DisabledItems and
+# StartupItems are pure harness debris -- a previous crashed run can leave the
+# add-in on Excel's disabled list, and then this script measures an add-in that
+# was never loaded and blames the product. DocumentRecovery is deliberately NOT
+# touched (it can hold a real user's unsaved workbooks); the gate above WARNs
+# about it and leaves the choice to a human.
+Clear-ExcelResiliency
 
 foreach ($l in @($goLog, $nativeLog)) {
     try { if (Test-Path $l) { Clear-Content $l -ErrorAction Stop } } catch { Write-Output "(could not clear ${l}: $_)" }
@@ -76,6 +83,11 @@ function Wait-Settled($ws, [string]$addr, [int]$timeoutSec = 45) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {
         if (-not (Test-Pending $ws $addr)) { break }
+        # A modal dialog freezes Excel's calculation, so the cell can never
+        # leave #GETTING_DATA and this loop burns its whole timeout before
+        # reporting the CELL as stuck. Same misread family as the .Text trap
+        # above: the observation is real, the attribution is wrong.
+        Assert-NoExcelModal -Context ("waiting for " + $addr + " to settle")
         Start-Sleep -Milliseconds 400
     }
     try { return [string]$ws.Range($addr).Text } catch { return '' }

@@ -10,6 +10,9 @@
 #   * stale Excel/server process kill               (Stop-ShowcaseProcesses)
 #   * UIA bootstrap ($AE/$TS) + Restart-Manager lock probe (Initialize-Uia, Probe-Lock)
 #   * visible Excel window enumeration              (Get-ExcelWindows)
+#   * MODAL dialog detection for polling loops       (Get-ExcelModalDialog,
+#       Assert-NoExcelModal) -- a modal turns every poll into a timeout that
+#       reads as "the feature under test is wedged"
 #   * blank-workbook prep via a SHORT-LIVED COM client (New-ShowcaseWorkbook)
 #   * launch real Excel + wait for the ready window (Start-ShowcaseExcel / Wait-ShowcaseWindow)
 #   * select the showcase ribbon tab + click Build  (Invoke-RibbonButton / Invoke-BuildShowcase)
@@ -18,6 +21,11 @@
 #       Stop-ShowcaseCom for COM graceful-Quit -> force-kill)
 #
 # Each consuming script keeps only its own sampling/verdict logic.
+#
+# SELF-TEST: tools\test-uia-common.ps1 covers everything here that can be checked
+# without Excel, including the modal detector against a REAL dialog. Run it after
+# touching this file -- it caught two stacked bugs in the detector on the day the
+# detector was written, one of which made it silently never fire.
 #
 # ----------------------------------------------------------------------------
 # ENCODING: this file is ASCII-ONLY on purpose. A .ps1 without a UTF-8 BOM is
@@ -251,6 +259,143 @@ function Get-ExcelWindows {
     return ,$out
 }
 
+# --- modal dialog detection -------------------------------------------------
+# A driver that polls for a cell value or a window while Excel is sitting on a
+# MODAL dialog polls until timeout and then reports the thing it was waiting
+# for as broken. That misread has a name in this repo's history: the RTD
+# external-data warning (DataConnectionWarnings != 0) put up a modal, the
+# driver timed out, and the run was written up as "RTD is wedged". The Trust
+# Center gate now prevents THAT particular modal, but a modal can appear for
+# reasons the gate cannot enumerate (a repair prompt, a license notice, an
+# unrelated add-in), so the polling loops need to be able to tell the two
+# apart. "Excel is asking a question" and "the feature under test is broken"
+# must not produce the same verdict.
+#
+# DETECTION PREDICATE, and why it is not just IsModal. The obvious test is
+# WindowPattern.Current.IsModal -- the property Windows itself sets, needing no
+# list of dialog titles. It was tried first and MEASURED WRONG (2026-08-03, this
+# machine, via tools\test-uia-common.ps1):
+#
+#   a dialog with NO owner window   -> class '#32770', IsModal = FALSE
+#   a dialog WITH an owner window   -> class '#32770', IsModal = TRUE
+#
+# So IsModal alone misses the unowned case entirely. The Win32 dialog CLASS
+# '#32770' was true in both, and it is not localized, so the predicate is
+#
+#     ClassName -eq '#32770'  OR  WindowPattern.IsModal
+#
+# ...keeping IsModal for any dialog Office draws with a class of its own.
+#
+# SCOPE also matters and was also measured: an OWNED dialog is not a child of the
+# desktop, it is a DESCENDANT of its owner frame, so a Children-only sweep of the
+# desktop finds nothing at all in the Excel case. Each candidate frame is
+# therefore searched to Descendants, and the frame itself is tested too (that is
+# where an unowned dialog turns up). The sweep is rooted per-process rather than
+# running Descendants from RootElement, which would walk the whole desktop tree.
+#
+# KNOWN over-trigger, accepted: a MODELESS '#32770' (Excel's Find dialog, say)
+# also reports. None of these drivers opens one, and a stray dialog stealing
+# focus would break them anyway, so failing is the right answer either way.
+#
+# Returns $null when no dialog is up, otherwise a pscustomobject with the dialog
+# Name, its visible text (joined), its ProcessId, and which signal fired.
+function Get-ExcelModalDialog {
+    param(
+        [int]$ProcessId = 0,       # 0 = any process that looks like Excel
+        [switch]$AnyProcess        # test hook: do not filter by name/pid at all
+    )
+    $winCond = New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
+
+    # 1. the frames worth searching
+    $frames = New-Object System.Collections.ArrayList
+    foreach ($w in $AE::RootElement.FindAll($TS::Children, $winCond)) {
+        try {
+            $keep = $false
+            if ($AnyProcess) {
+                $keep = $true
+            } elseif ($ProcessId -gt 0) {
+                $keep = ($w.Current.ProcessId -eq $ProcessId)
+            } else {
+                # A dialog's Name is its own title, not 'Excel', so fall back to
+                # the owning process actually being an Excel process.
+                $keep = ($w.Current.Name -match 'Excel')
+                if (-not $keep) {
+                    try { $keep = ((Get-Process -Id $w.Current.ProcessId -EA Stop).ProcessName -eq 'EXCEL') } catch {}
+                }
+            }
+            if ($keep) { [void]$frames.Add($w) }
+        } catch {}
+    }
+
+    # 2. the frame itself, then every Window descendant of it
+    foreach ($f in $frames) {
+        $cands = New-Object System.Collections.ArrayList
+        [void]$cands.Add($f)
+        try { foreach ($d in $f.FindAll($TS::Descendants, $winCond)) { [void]$cands.Add($d) } } catch {}
+
+        foreach ($w in $cands) {
+            try {
+                $cls = ''
+                try { $cls = $w.Current.ClassName } catch {}
+                $isDlgClass = ($cls -eq '#32770')
+                $isModal = $false
+                try { $isModal = $w.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Current.IsModal } catch {}
+                if (-not ($isDlgClass -or $isModal)) { continue }
+
+                # The MESSAGE, which is the whole reason a caller can act on the
+                # throw. Collected by WIN32 CLASS ('Static' = a label), not by
+                # ControlType: a MessageBox's message line was measured to be
+                # ControlType.Pane, so filtering on ControlType.Text -- the
+                # obvious choice, and the first one tried -- returned nothing and
+                # every thrown message came out with an empty text field.
+                # Button labels are skipped: they are localized and say nothing
+                # about what is being asked.
+                $msg = New-Object System.Collections.ArrayList
+                try {
+                    foreach ($t in $w.FindAll($TS::Descendants, [Windows.Automation.Condition]::TrueCondition)) {
+                        try {
+                            $tc = ''
+                            try { $tc = $t.Current.ClassName } catch {}
+                            $isLabel = ($tc -eq 'Static') -or
+                                       ($t.Current.ControlType -eq [Windows.Automation.ControlType]::Text)
+                            if (-not $isLabel) { continue }
+                            $n = $t.Current.Name
+                            if ($n) { [void]$msg.Add($n) }
+                        } catch {}
+                    }
+                } catch {}
+                return [pscustomobject]@{
+                    Name      = $w.Current.Name
+                    Text      = ($msg -join ' | ')
+                    ProcessId = $w.Current.ProcessId
+                    Signal    = $(if ($isDlgClass -and $isModal) { 'class+modal' } elseif ($isDlgClass) { 'class' } else { 'modal' })
+                }
+            } catch {}
+        }
+    }
+    return $null
+}
+
+# Throws when a modal dialog is blocking Excel. Call this from inside polling
+# loops so a modal FAILS THE RUN with the dialog's own text instead of being
+# laundered into a timeout on whatever the loop was sampling.
+#
+# NOT called from Close-ExcelWindowFaithful: that function's entire job is to
+# put up and dismiss the "Save changes?" prompt, so a modal there is the
+# EXPECTED state, not an error. Keep it that way -- wiring this into the close
+# path would make every faithful close fail.
+function Assert-NoExcelModal {
+    param([int]$ProcessId = 0, [string]$Context = 'polling')
+    $dlg = Get-ExcelModalDialog -ProcessId $ProcessId
+    if ($dlg) {
+        throw ("Excel is blocked on a MODAL dialog during {0}: '{1}'{2}. " -f
+                   $Context, $dlg.Name, ($(if ($dlg.Text) { " -- text: '" + $dlg.Text + "'" } else { "" }))) +
+              "This is an ENVIRONMENT/interaction problem, not a product defect: a driver that keeps " +
+              "polling here would time out and the timeout would be misread as the feature under test " +
+              "being wedged. Dismiss the dialog, remove its cause, then re-run."
+    }
+}
+
 # --- stale / final process kill (tier-2 of the two-tier teardown for the
 #     UIA-driven scripts that never hold a COM client) -----------------------
 # Kills EXCEL + the showcase Go server (and the legacy 'go_server' name when
@@ -313,6 +458,11 @@ function Wait-ShowcaseWindow {
             if ($ResolvedPid) { try { $ResolvedPid.Value = $w.Current.ProcessId } catch {} }
             return $w
         }
+        # A modal dialog here (repair prompt, recovery pane, license notice) means
+        # the ready workbook window will NEVER appear, so the remaining tries are
+        # dead time that ends in "FAIL: no ready window" -- a verdict that points
+        # at the add-in instead of at the dialog actually holding Excel.
+        Assert-NoExcelModal -Context 'waiting for the ready workbook window'
         Start-Sleep -Milliseconds $IntervalMs
     }
     return $null

@@ -7,7 +7,7 @@ require (
 	github.com/xll-gen/shm v0.9.1
 	github.com/xll-gen/sugar v0.8.15
 	github.com/xll-gen/types v0.2.21
-	github.com/xll-gen/xll-gen v0.8.54
+	github.com/xll-gen/xll-gen v0.8.55
 )
 
 require (

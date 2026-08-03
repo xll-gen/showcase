@@ -162,6 +162,40 @@ foreach ($owned in @($false, $true)) {
 }
 
 # ---------------------------------------------------------------------------
+# 3b. the detector must not need Initialize-Uia
+# ---------------------------------------------------------------------------
+# THIS CASE COST A REAL FAILURE. Assert-NoExcelModal is wired into Wait-Settled in
+# verify-gridonce-error-uia.ps1, but that driver (and verify-ydp-stranding) is pure
+# COM and never calls Initialize-Uia. The detector originally read $AE, so
+# $AE::ControlTypeProperty on a null $AE threw "Value cannot be null (Parameter
+# 'property')" from inside the poll loop -- surfacing as a DRIVER ERROR in the middle
+# of a product test, on check [3] of a run whose checks [1] and [2] had passed.
+#
+# Section [3] above ran Initialize-Uia first, so it could never have caught this. The
+# fix is that Get-ExcelModalDialog self-bootstraps; this pins it by NULLING the
+# published variables before calling in.
+Write-Output "[3b] the detector works without Initialize-Uia (two drivers never call it)"
+$savedAE = $AE
+$savedTS = $TS
+try {
+    Set-Variable -Name AE -Scope Script -Value $null
+    Set-Variable -Name TS -Scope Script -Value $null
+    $threw = $false
+    $err = ''
+    try { $null = Get-ExcelModalDialog -AnyProcess } catch { $threw = $true; $err = "$_" }
+    Check (-not $threw) ("Get-ExcelModalDialog does not require Initialize-Uia" +
+        $(if ($threw) { " -- threw: $err" } else { "" }))
+    $threw = $false
+    try { Assert-NoExcelModal -Context 'self-test, uninitialized UIA' } catch { $threw = $true; $err = "$_" }
+    # No modal is up, so this must return quietly rather than throwing a UIA error.
+    Check (-not $threw) ("Assert-NoExcelModal does not require Initialize-Uia" +
+        $(if ($threw) { " -- threw: $err" } else { "" }))
+} finally {
+    Set-Variable -Name AE -Scope Script -Value $savedAE
+    Set-Variable -Name TS -Scope Script -Value $savedTS
+}
+
+# ---------------------------------------------------------------------------
 # 4. the modal check is wired into the polling loops -- and NOT into the close
 # ---------------------------------------------------------------------------
 # Close-ExcelWindowFaithful's job is to raise and dismiss the "Save changes?"

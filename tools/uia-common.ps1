@@ -304,11 +304,21 @@ function Get-ExcelModalDialog {
         [int]$ProcessId = 0,       # 0 = any process that looks like Excel
         [switch]$AnyProcess        # test hook: do not filter by name/pid at all
     )
-    $winCond = New-Object Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
+    # SELF-BOOTSTRAP. This must NOT depend on the caller having run Initialize-Uia:
+    # two of the six drivers (verify-gridonce-error, verify-ydp-stranding) are pure
+    # COM and never call it, yet they poll through Wait-Settled and so reach here.
+    # Relying on $AE cost a real failure -- $AE::ControlTypeProperty on a null $AE
+    # throws "Value cannot be null (Parameter 'property')" from inside the poll
+    # loop, which surfaces as a DRIVER ERROR in the middle of a product test.
+    # Add-Type is idempotent, so paying it here is free after the first call.
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $ae = [Windows.Automation.AutomationElement]
+    $ts = [Windows.Automation.TreeScope]
+    $winCond = New-Object Windows.Automation.PropertyCondition($ae::ControlTypeProperty, [Windows.Automation.ControlType]::Window)
 
     # 1. the frames worth searching
     $frames = New-Object System.Collections.ArrayList
-    foreach ($w in $AE::RootElement.FindAll($TS::Children, $winCond)) {
+    foreach ($w in $ae::RootElement.FindAll($ts::Children, $winCond)) {
         try {
             $keep = $false
             if ($AnyProcess) {
@@ -331,7 +341,7 @@ function Get-ExcelModalDialog {
     foreach ($f in $frames) {
         $cands = New-Object System.Collections.ArrayList
         [void]$cands.Add($f)
-        try { foreach ($d in $f.FindAll($TS::Descendants, $winCond)) { [void]$cands.Add($d) } } catch {}
+        try { foreach ($d in $f.FindAll($ts::Descendants, $winCond)) { [void]$cands.Add($d) } } catch {}
 
         foreach ($w in $cands) {
             try {
@@ -352,7 +362,7 @@ function Get-ExcelModalDialog {
                 # about what is being asked.
                 $msg = New-Object System.Collections.ArrayList
                 try {
-                    foreach ($t in $w.FindAll($TS::Descendants, [Windows.Automation.Condition]::TrueCondition)) {
+                    foreach ($t in $w.FindAll($ts::Descendants, [Windows.Automation.Condition]::TrueCondition)) {
                         try {
                             $tc = ''
                             try { $tc = $t.Current.ClassName } catch {}

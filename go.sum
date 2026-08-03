@@ -4,12 +4,12 @@ github.com/google/flatbuffers v25.9.23+incompatible h1:rGZKv+wOb6QPzIdkM2KxhBZCD
 github.com/google/flatbuffers v25.9.23+incompatible/go.mod h1:1AeVuKshWv4vARoZatz6mlQ0JxURH0Kv5+zNeJKJCa8=
 github.com/xll-gen/shm v0.8.20 h1:/TkafJYrYsiLeQiPYMT0segB2n+U/lUKvdBETfTSTdI=
 github.com/xll-gen/shm v0.8.20/go.mod h1:1iExphNnTM6uYky3usR8LqOUR0mz1urvdgd8W6PiJ88=
-github.com/xll-gen/sugar v0.8.12 h1:OGlkbcWLXF9muEn//PUL82PJPg6Jr1VZYbRjgKaSy/s=
-github.com/xll-gen/sugar v0.8.12/go.mod h1:k/kQONVQoOsOZVPcLhJLtvU1GW690GMj3jYEtTnakvY=
+github.com/xll-gen/sugar v0.8.13 h1:CKfN6JZ12yl249YCcl+PlrFDK3gXsLoZQ0NZbsxnvpo=
+github.com/xll-gen/sugar v0.8.13/go.mod h1:k/kQONVQoOsOZVPcLhJLtvU1GW690GMj3jYEtTnakvY=
 github.com/xll-gen/types v0.2.20 h1:G6M082tMps8a9RsfzjbPdI0f+DUdc1Ojn+H//Z0CMyQ=
 github.com/xll-gen/types v0.2.20/go.mod h1:QYoTxSTmx6mEsRYqeAjq3sWSyUyr9PM0MoDGTAHUY7o=
-github.com/xll-gen/xll-gen v0.8.49 h1:EiGT67aEgriqdMK8mdR8xdp8Lw8q8sIk6wj8g2IJxTI=
-github.com/xll-gen/xll-gen v0.8.49/go.mod h1:iMwE8UqAST+nyCVPkfwtH/Q+vD8Oe2Ez2wY/4gGI+wQ=
+github.com/xll-gen/xll-gen v0.8.50 h1:6/m4+8PsBzmsva4E/fiSbd73zQ0ttqfYq3bG2uf+t8M=
+github.com/xll-gen/xll-gen v0.8.50/go.mod h1:kj6eWs/S0aKasLxtgtrwIrcD7utZHefs9OxOh+vp43k=
 golang.org/x/sys v0.1.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/sys v0.33.0 h1:q3i8TbbEz+JRD9ywIRlyRAQbM0qF7hu24q3teo2hbuw=
 golang.org/x/sys v0.33.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=

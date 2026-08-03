@@ -14,7 +14,7 @@
 # Then read build\xll_showcase_native.log / xll_showcase_go.log for the tail.
 
 . "$PSScriptRoot\uia-common.ps1"
-$P = Resolve-ShowcasePaths; $xll = $P.Xll
+$P = Resolve-ShowcasePaths; $xll = $P.Xll; $nativeLog = $P.NativeLog
 # Environment before product: an unmet Trust Center lever produces this
 # script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
 Assert-ExcelTrustPreconditions -XllPath $xll -RequireRtd
@@ -34,14 +34,30 @@ Start-Sleep 1
 $tmp = New-ShowcaseWorkbook -Name "uia_showcase_repro.xlsx"
 
 # Launch Excel NORMALLY (no held COM object): opens workbook + loads XLL addin + ribbon.
+# $launchedAt gates the native-log rung of the load ladder: this script does NOT
+# clear the logs, so a log left by an EARLIER run would otherwise read as proof
+# that the add-in loaded in THIS one.
+$launchedAt = Get-Date
 $p = Start-ShowcaseExcel -Workbook $tmp -Xll $xll
 $pid2 = $p.Id; Write-Output "launched EXCEL pid=$pid2"
 
 $win = Wait-ShowcaseWindow -LaunchedPid $pid2 -Tries 30
-if (-not $win) { Write-Output "no ready window"; Stop-ShowcaseProcesses; return }
+if (-not $win) {
+    # Same symptom, two causes: the add-in never loaded (environment) or it loaded
+    # and wedged Excel (product -- which is what this script is hunting). Say which.
+    Write-Output "no ready window"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+    Stop-ShowcaseProcesses; return
+}
 
 # Select the custom ribbon tab so its buttons enter the UIA tree, then Invoke the button.
-if (-not (Invoke-RibbonButton -Window $win -NamePattern 'Build')) { Write-Output "no Build button"; Stop-ShowcaseProcesses; return }
+if (-not (Invoke-RibbonButton -Window $win -NamePattern 'Build')) {
+    # The showcase ribbon tab IS the add-in: no Build button means it did not load,
+    # which is an ENVIRONMENT verdict, not "the command crashes Excel".
+    Write-Output "no Build button"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+    Stop-ShowcaseProcesses; return
+}
 Write-Output "invoked 'Build Showcase Sheet' — monitoring 32s for crash/hang..."
 
 $verdict = "ALIVE+RESPONSIVE"; $hung = 0

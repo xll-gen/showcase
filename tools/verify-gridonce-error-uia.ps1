@@ -125,8 +125,13 @@ try {
     Write-Output "    A1 settled to: '$t1'"
     if (Test-Pending $ws "A1") {
         Fail "A1 never settled (still '$t1') — the grid-once error was dropped and the cell is wedged"
+        # A wedged cell and an add-in that never loaded look the same from here, and
+        # so do a '#NAME?' cell and a renamed function. This script CLEARS both logs
+        # at start, so an empty native log is a clean "the entry point never ran".
+        Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog
     } elseif ($t1 -notmatch 'days must be') {
         Fail "A1 settled to '$t1' but does not carry the handler's message"
+        Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog
     } else {
         Pass "A1 shows the handler error text"
     }

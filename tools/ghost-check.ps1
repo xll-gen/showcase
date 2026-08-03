@@ -44,6 +44,10 @@ Start-Sleep 1
 
 $tmp = New-ShowcaseWorkbook -Name "ghost_check.xlsx"
 
+# $launchedAt gates the native-log rung of the load ladder: this script does NOT
+# clear the logs, so a log left by an EARLIER run would otherwise read as proof
+# that the add-in loaded in THIS one.
+$launchedAt = Get-Date
 $p = Start-ShowcaseExcel -Workbook $tmp -Xll $xll
 Write-Output "launched EXCEL pid=$($p.Id)"
 
@@ -52,16 +56,33 @@ Write-Output "launched EXCEL pid=$($p.Id)"
 # then poll up to ~30s.
 $excelPid = $p.Id
 $win = Wait-ShowcaseWindow -LaunchedPid $p.Id -ResolvedPid ([ref]$excelPid) -SettleFirst 6 -Tries 38
-if (-not $win) { Write-Output "FAIL: no ready window"; Stop-ShowcaseProcesses; return }
+if (-not $win) {
+    # "No ready window" has two causes with one symptom: the add-in never loaded
+    # (environment) or it loaded and wedged Excel (product). Say which.
+    Write-Output "FAIL: no ready window"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+    Stop-ShowcaseProcesses; return
+}
 Write-Output "ready Excel window pid=$excelPid (launched pid=$($p.Id))"
 Start-Sleep 2
 
 $srvBefore = Get-Process xll_showcase -EA SilentlyContinue
 Write-Output ("server pids after load: " + (($srvBefore.Id) -join ','))
+# No server process after the window is up is the signature of an add-in that was
+# never loaded at all -- and the ghost/orphan verdicts below would be about nothing.
+if (-not $srvBefore) {
+    Write-Output "WARN: no server process after load -- the add-in should be loaded by now"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+}
 
 # select custom ribbon tab + invoke Build (heavy calc -> CalculationEnded -> arms xlcOnTime)
 if (Invoke-RibbonButton -Window $win -NamePattern 'Build') { Write-Output "invoked Build" }
-else { Write-Output "WARN: Build button not found/invoked" }
+else {
+    # The showcase ribbon tab IS the add-in. No Build button = the add-in did not
+    # load its ribbon, so the close-time verdicts below have nothing to observe.
+    Write-Output "WARN: Build button not found/invoked"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+}
 # -FastClose: close almost immediately after Build to catch the xlcOnTime
 # deferred runner while it is still ARMED (it arms at CalculationEnded and Excel
 # dispatches the OnTime macro at the next idle, which a normal 5s wait lets drain).

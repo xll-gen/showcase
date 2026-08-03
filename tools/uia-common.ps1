@@ -7,6 +7,10 @@
 #   * Trust Center precondition gate                (Assert-ExcelTrustPreconditions,
 #       Test-ExcelTrustedLocation, Clear-ExcelResiliency) -- call it FIRST; an
 #       unmet lever fakes the very defects these scripts hunt
+#   * "was the add-in even loaded?" ladder          (Get-XllLoadFailureDiagnosis,
+#       Write-XllLoadDiagnosis, Get-ExcelDisabledItems) -- call it AT THE POINT
+#       OF FAILURE; it separates "never loaded" (environment) from "a feature is
+#       broken" (product), which otherwise look identical
 #   * stale Excel/server process kill               (Stop-ShowcaseProcesses)
 #   * UIA bootstrap ($AE/$TS) + Restart-Manager lock probe (Initialize-Uia, Probe-Lock)
 #   * visible Excel window enumeration              (Get-ExcelWindows)
@@ -89,8 +93,12 @@ function Resolve-ShowcasePaths {
 $ExcelSecurityKey = 'HKCU:\Software\Microsoft\Office\16.0\Excel\Security'
 
 function Test-ExcelTrustedLocation {
-    param([Parameter(Mandatory)][string]$Folder)
-    $root = Join-Path $ExcelSecurityKey 'Trusted Locations'
+    # -SecurityKey exists so the self-test can point the whole trust/resiliency
+    # ladder at a SCRATCH registry subtree. Changing a real user's security
+    # settings to test a detector is not acceptable, and a detector that is only
+    # ever run against the machine's real settings is untested by definition.
+    param([Parameter(Mandatory)][string]$Folder, [string]$SecurityKey = $ExcelSecurityKey)
+    $root = Join-Path $SecurityKey 'Trusted Locations'
     if (-not (Test-Path $root)) { return $false }
     $target = [System.IO.Path]::GetFullPath($Folder).TrimEnd('\') + '\'
     foreach ($k in (Get-ChildItem $root -EA SilentlyContinue)) {
@@ -173,6 +181,267 @@ function Clear-ExcelResiliency {
         $p = Join-Path $res $sub
         if (Test-Path $p) { Remove-Item $p -Recurse -Force -EA SilentlyContinue; Write-Output ("cleared Resiliency\{0}" -f $sub) }
     }
+}
+
+# --- "was the add-in even LOADED?" exclusion ladder --------------------------
+# WHY THIS EXISTS. Every driver in this folder can fail in two ways that produce
+# byte-identical symptoms: no ready window, no Build button on the ribbon, a cell
+# parked on the loading placeholder, a #NAME? formula, an empty log. Either
+#   (a) THE ADD-IN WAS NEVER LOADED -- an ENVIRONMENT problem; every verdict in
+#       the run is about code that never ran, or
+#   (b) the add-in loaded and a feature is broken -- a real product defect.
+# Reporting (a) as (b) is the most expensive mistake this harness can make: it
+# files a bug against a binary Excel never touched.
+#
+# WHAT THE PRECONDITION GATE ALREADY SETTLES, STATED ACCURATELY (corrected
+# 2026-08-03). This paragraph used to say the gate 'CANNOT settle this'. That is
+# false for rung 1: Assert-ExcelTrustPreconditions tests the SAME
+# RequireAddinSig=1 + not-a-trusted-location condition and THROWS before Excel is
+# started, so in a run that called the gate, rung 1 can only fire if the registry
+# changed after the gate ran -- or if the driver never called the gate at all.
+# Rung 1 is kept for exactly those two cases, and because the ladder is a shared
+# function with no way to know which. What the gate genuinely cannot settle is
+# the rest: DisabledItems is only WARNED about (never fatal, because a stale
+# entry that names something else must not block a run), the disabled-items
+# decision is made by Excel at THIS load, and the native log does not exist until
+# the DLL entry point runs. So the ladder is evaluated AT THE POINT OF FAILURE,
+# and the rung order is not cosmetic -- each rung MASKS every rung below it, so
+# the first one that fires is the answer:
+#
+#   0. the XLL file is not there at all
+#        every rung below is about how Excel treated a file that does not exist.
+#        Without this rung a leftover native log from an earlier build made the
+#        ladder answer 'Loaded -- this belongs to the product' for a missing XLL.
+#   1. RequireAddinSig=1 AND the folder is not a trusted location
+#        Excel refuses the unsigned XLL with no dialog, no log, no process.
+#        Nothing below can be observed, therefore nothing below can be believed.
+#   2. Resiliency\DisabledItems  (values AND subkeys -- Excel uses both shapes)
+#        a previous crash put the add-in on the disabled list; Excel skips it
+#        silently on every subsequent start. Again nothing below is observable.
+#   3. the native log
+#        the first thing the DLL entry point writes. Missing or empty => the
+#        add-in never ran. Present => it DID load, and the failure the caller is
+#        holding belongs to the product.
+#
+# There is deliberately NO throwing variant. Every driver reaches this point
+# holding live Excel and Go-server processes it still has to tear down; a throw
+# would skip the two-tier teardown and leave them running, which corrupts the
+# NEXT run -- the exact class of mistake this ladder exists to catch. Callers
+# print the diagnosis and then continue into their own cleanup path.
+
+# Enumerates Excel's disabled-items entries as {Name, Text}. The entries are
+# REG_BINARY blobs; the path Excel disabled is carried inside as UTF-16, so the
+# blob is decoded BOTH ways and reduced to printable ASCII for matching. Some
+# entries carry no readable path at all, which is why the caller distinguishes
+# "an entry names our file" from "there are entries" (different confidence).
+#
+# VALUES **AND SUBKEYS** (fixed 2026-08-03). This read only GetValueNames(), so
+# a DisabledItems entry stored as a SUBKEY was invisible: the ladder skipped rung
+# 2 and answered rung=Loaded -- "this failure belongs to the product" -- for an
+# add-in Excel had disabled. The precheck at Assert-ExcelTrustPreconditions was
+# already counting ValueCount + SubKeyCount, so the two disagreed about the same
+# registry key: the run printed a residue WARN and then a Loaded verdict. A
+# subkey contributes one entry per value it holds, plus one for the subkey itself
+# when it holds none, so an entry cannot be counted as zero.
+function Get-ExcelDisabledItems {
+    param([string]$SecurityKey = $ExcelSecurityKey)
+    $out = New-Object System.Collections.ArrayList
+    $path = Join-Path (Split-Path -Parent $SecurityKey) 'Resiliency\DisabledItems'
+    if (-not (Test-Path $path)) { return ,$out }
+    $k = $null
+    try { $k = Get-Item $path -EA Stop } catch { return ,$out }
+
+    $decode = {
+        param($v)
+        if ($v -is [byte[]]) {
+            # TWO decodes, because the UTF-16 one only lands when the path happens
+            # to start on an even offset inside the blob. Dropping the NUL bytes
+            # and reading what is left as ASCII recovers the path at EITHER
+            # alignment, and also covers entries stored as plain bytes.
+            $u = [Text.Encoding]::Unicode.GetString($v)
+            $z = [Text.Encoding]::ASCII.GetString([byte[]]@($v | Where-Object { $_ -ne 0 }))
+            # Non-printables become spaces; runs of spaces collapse. ASCII-only
+            # source, so this regex is safe under any codepage (see ENCODING).
+            (($u + ' ' + $z) -replace '[^\x20-\x7E]', ' ') -replace ' {2,}', ' '
+        } else {
+            [string]$v
+        }
+    }
+
+    foreach ($n in $k.GetValueNames()) {
+        $v = $null
+        try { $v = $k.GetValue($n) } catch { continue }
+        [void]$out.Add([pscustomobject]@{ Name = $n; Text = ([string](& $decode $v)).Trim() })
+    }
+
+    foreach ($sn in $k.GetSubKeyNames()) {
+        $sk = $null
+        try { $sk = Get-Item (Join-Path $path $sn) -EA Stop } catch { continue }
+        $any = $false
+        foreach ($n in $sk.GetValueNames()) {
+            $v = $null
+            try { $v = $sk.GetValue($n) } catch { continue }
+            $any = $true
+            # The subkey NAME is prepended: Excel sometimes carries the path
+            # there and nowhere in the values.
+            $txt = ($sn + ' ' + [string](& $decode $v)).Trim()
+            [void]$out.Add([pscustomobject]@{ Name = ($sn + '\' + $n); Text = $txt })
+        }
+        if (-not $any) {
+            [void]$out.Add([pscustomobject]@{ Name = $sn; Text = $sn })
+        }
+    }
+    return ,$out
+}
+
+# Runs the ladder and returns a verdict object:
+#   Rung        MissingXll | RequireAddinSig | DisabledItems | NoNativeLog | StaleNativeLog | Loaded
+#   Loaded      $false for every rung except 'Loaded'
+#   Confidence  high | low   ('low' = the rung fired on circumstantial evidence)
+#   Cause / Remediation / Evidence / Message
+# The Message is the printable form, and it reports the native-log state whichever
+# rung fired (on its own line unless the evidence line already IS that state), so
+# a low-confidence rung 2 can be weighed against it instead of taken on faith.
+#   -NativeLog : defaults to the showcase native log beside the XLL.
+#   -Since     : the moment this run launched Excel. A log older than that was
+#                written by an EARLIER run, so it proves nothing about this one.
+#   -SecurityKey : scratch-registry hook for the self-test.
+function Get-XllLoadFailureDiagnosis {
+    param(
+        [Parameter(Mandatory)][string]$XllPath,
+        [string]$NativeLog,
+        [datetime]$Since,
+        [string]$SecurityKey = $ExcelSecurityKey
+    )
+    $full   = [System.IO.Path]::GetFullPath($XllPath)
+    $folder = Split-Path -Parent $full
+    $leaf   = Split-Path -Leaf $full
+    if (-not $NativeLog) { $NativeLog = Join-Path $folder 'xll_showcase_native.log' }
+    $useSince = $PSBoundParameters.ContainsKey('Since')
+
+    # --- observations (all three rungs are MEASURED before any is chosen, so the
+    # message can report the others as context) -------------------------------
+    $sec     = Get-ItemProperty $SecurityKey -EA SilentlyContinue
+    $sig     = if ($sec -and $null -ne $sec.RequireAddinSig) { [int]$sec.RequireAddinSig } else { 0 }
+    $trusted = Test-ExcelTrustedLocation -Folder $folder -SecurityKey $SecurityKey
+    # NOT @(Get-ExcelDisabledItems ...): that helper returns a wrapped ArrayList
+    # (',$out', the same stable-type idiom Get-ExcelWindows uses), so @() around
+    # the call yields a ONE-element array holding the list itself -- $_.Text is
+    # then $null and the ladder dies mid-diagnosis. Measured, not theorised.
+    $items   = Get-ExcelDisabledItems -SecurityKey $SecurityKey
+    $mine    = @($items | Where-Object { ("" + $_.Text).IndexOf($leaf, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+
+    $logExists = Test-Path $NativeLog
+    $logLen    = -1
+    $logWrite  = $null
+    if ($logExists) {
+        try { $fi = Get-Item $NativeLog -EA Stop; $logLen = $fi.Length; $logWrite = $fi.LastWriteTime } catch { $logExists = $false }
+    }
+    $logNote =
+        if (-not $logExists)  { "native log MISSING ({0})" -f $NativeLog }
+        elseif ($logLen -eq 0) { "native log EMPTY ({0})" -f $NativeLog }
+        else { "native log present ({0}, {1} bytes, last write {2:yyyy-MM-dd HH:mm:ss})" -f $NativeLog, $logLen, $logWrite }
+    $logStale = ($logExists -and $logLen -gt 0 -and $useSince -and $logWrite -lt $Since)
+
+    # The XLL's own existence. Measured with the same care as the log, because
+    # this is the state that used to be answered "Loaded (measured)".
+    $xllExists = Test-Path -LiteralPath $full -PathType Leaf
+    $xllNote   = if ($xllExists) { "XLL present ({0})" -f $full } else { "XLL MISSING ({0})" -f $full }
+
+    $rung = ''; $conf = 'high'; $cause = ''; $fix = ''; $ev = ''
+
+    # --- rung 0: the file is not there at all ---------------------------------
+    # Added 2026-08-03. Without it, a native log left behind by an EARLIER build
+    # (probe P4) made every rung below fall through to 'Loaded' -- the ladder
+    # reported "the add-in DID load, this belongs to the product" for an XLL that
+    # does not exist. -Since only downgrades that to the low-confidence
+    # StaleNativeLog rung, and only when the caller passes it.
+    if (-not $xllExists) {
+        $rung  = 'MissingXll'
+        $cause = ("the add-in was NEVER LOADED: there is no file at '{0}'. Every rung below is about how Excel treated a file that is not there, and any native log present was written by an earlier build." -f $full)
+        $ev    = $xllNote
+        $fix   = "build the showcase XLL (task build-cpp-debug / build-cpp) or correct -XllPath, then RE-RUN; this run's verdict is void."
+    }
+    # --- rung 1: the signature requirement, which hides rungs 2 and 3 ---------
+    elseif ($sig -eq 1 -and -not $trusted) {
+        $rung  = 'RequireAddinSig'
+        $cause = ("the add-in was NEVER LOADED: RequireAddinSig=1 and '{0}' is not a trusted location, so Excel refused the UNSIGNED XLL silently -- no dialog, no log, no server process." -f $folder)
+        $ev    = ("RequireAddinSig=1, trusted location=False, folder={0}" -f $folder)
+        $fix   = ("add the folder as a Trusted Location (New-Item '{0}\Trusted Locations\LocationXLLGen' -Force; " -f $SecurityKey) +
+                 ("Set-ItemProperty '{0}\Trusted Locations\LocationXLLGen' Path '{1}'; " -f $SecurityKey, $folder) +
+                 ("Set-ItemProperty '{0}\Trusted Locations\LocationXLLGen' AllowSubfolders 1) -- or set RequireAddinSig=0. Then RE-RUN; this run's verdict is void." -f $SecurityKey)
+    }
+    # --- rung 2: the disabled list, which hides rung 3 ------------------------
+    elseif ($items.Count -gt 0) {
+        $rung  = 'DisabledItems'
+        if ($mine.Count -gt 0) {
+            $cause = ("the add-in was NEVER LOADED: Excel's Resiliency\DisabledItems names '{0}'. A previous crash disabled it and Excel has skipped it silently at every start since." -f $leaf)
+            $ev    = ("DisabledItems entry: {0}" -f ($mine[0].Text))
+        } else {
+            $conf  = 'low'
+            $cause = ("the add-in may never have been LOADED: Resiliency\DisabledItems holds {0} entry/entries. None decodes to '{1}', but Excel also records entries with no readable path, so this cannot be cleared by inspection -- weigh it against the native-log line below." -f $items.Count, $leaf)
+            $ev    = ("DisabledItems entries: {0} (none naming this file)" -f $items.Count)
+        }
+        $fix = "run Clear-ExcelResiliency (or Remove-Item '" + (Join-Path (Split-Path -Parent $SecurityKey) 'Resiliency\DisabledItems') + "' -Recurse) and RE-RUN; this run's verdict is void."
+    }
+    # --- rung 3: the native log ----------------------------------------------
+    elseif (-not $logExists -or $logLen -eq 0) {
+        $rung  = 'NoNativeLog'
+        $cause = "the add-in was NEVER LOADED: the DLL entry point never wrote its native log, so nothing in the add-in ran. Signature policy and the disabled list are both clear, so the failure is upstream of them."
+        $ev    = $logNote
+        $fix   = ("confirm the XLL exists at '{0}', that its BITNESS matches this Excel (a 32-bit Excel cannot load a 64-bit XLL and says nothing), that the file is not mark-of-the-web blocked (Unblock-File '{0}'), and that the launch actually passed it to Excel." -f $full)
+    }
+    elseif ($logStale) {
+        $rung  = 'StaleNativeLog'
+        $conf  = 'low'
+        $cause = ("the add-in probably did NOT load in THIS run: the native log's last write ({0:yyyy-MM-dd HH:mm:ss}) predates this run's launch ({1:yyyy-MM-dd HH:mm:ss}), so its contents are left over from an earlier run. Note the other reading: Windows can delay a timestamp update while the writer still holds the file open, so read the log TAIL before concluding." -f $logWrite, $Since)
+        $ev    = $logNote
+        $fix   = ("read the tail of '{0}'; if it does not cover this run, treat the add-in as not loaded and re-run after checking bitness and the launch command line." -f $NativeLog)
+    }
+    # --- no rung fired: the add-in DID load ----------------------------------
+    else {
+        $rung  = 'Loaded'
+        $cause = "the add-in DID load (the entry point wrote the native log), so this failure is NOT a load failure -- it belongs to the product. Record it as a defect and read the log tail."
+        $ev    = $logNote
+        $fix   = ("read the tail of '{0}' and its Go-side sibling for the failing call." -f $NativeLog)
+    }
+
+    # The native-log line is always present EXCEPT where it would merely repeat the
+    # evidence line: the rungs that fired ON the log already say it.
+    $msg = ("XLL-LOAD DIAGNOSIS [rung={0} confidence={1}]: {2}" -f $rung, $conf, $cause) + [Environment]::NewLine +
+           ("  evidence   : {0}" -f $ev) + [Environment]::NewLine +
+           $(if ($ev -ne $logNote) { ("  native log : {0}" -f $logNote) + [Environment]::NewLine } else { "" }) +
+           ("  next step  : {0}" -f $fix)
+
+    [pscustomobject]@{
+        Rung        = $rung
+        Loaded      = ($rung -eq 'Loaded')
+        Confidence  = $conf
+        Cause       = $cause
+        Evidence    = $ev
+        Remediation = $fix
+        NativeLog   = $NativeLog
+        LogNote     = $logNote
+        Message     = $msg
+    }
+}
+
+# Prints the ladder's verdict. This is what the drivers call at the point where
+# the add-in should be loaded by now and evidently is not; it never throws, so
+# the caller's teardown still runs (see the note above).
+function Write-XllLoadDiagnosis {
+    param(
+        [Parameter(Mandatory)][string]$XllPath,
+        [string]$NativeLog,
+        [datetime]$Since,
+        [string]$SecurityKey = $ExcelSecurityKey
+    )
+    $a = @{ XllPath = $XllPath; SecurityKey = $SecurityKey }
+    if ($NativeLog) { $a['NativeLog'] = $NativeLog }
+    if ($PSBoundParameters.ContainsKey('Since')) { $a['Since'] = $Since }
+    $d = $null
+    try { $d = Get-XllLoadFailureDiagnosis @a } catch { Write-Output ("XLL-LOAD DIAGNOSIS unavailable: {0}" -f $_); return }
+    Write-Output $d.Message
 }
 
 # --- UIA bootstrap ----------------------------------------------------------

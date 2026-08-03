@@ -11,7 +11,7 @@
 
 . "$PSScriptRoot\uia-common.ps1"
 $ErrorActionPreference = 'Continue'
-$xll = (Resolve-ShowcasePaths).Xll
+$P = Resolve-ShowcasePaths; $xll = $P.Xll; $nativeLog = $P.NativeLog
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
 # Environment before product: an unmet Trust Center lever produces this
 # script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
@@ -29,6 +29,10 @@ Initialize-Uia
 Stop-ShowcaseProcesses
 Start-Sleep 1
 
+# $launchedAt gates the native-log rung of the load ladder: this script does NOT
+# clear the logs, so a log left by an EARLIER run would otherwise read as proof
+# that the add-in loaded in THIS one.
+$launchedAt = Get-Date
 $app = New-Object -ComObject Excel.Application
 $app.Visible = $true
 $app.DisplayAlerts = $false
@@ -85,6 +89,15 @@ $samples | ForEach-Object { Write-Output $_ }
 Write-Output "distinct Clock values: $($clockVals.Count) -> [$([string]::Join(', ', $clockVals))]"
 Write-Output "distinct StockTick values: $($stockVals.Count)"
 if ($dialog) { Write-Output "DIALOG DETECTED: $dialog" }
+
+# A Clock cell that never advanced is the pre-fix stream-death signature -- and it
+# is ALSO exactly what a '#NAME?' cell looks like from here, i.e. an add-in that
+# never loaded and never registered Clock at all. One of those is a product defect
+# and the other voids the run, so name which one before the verdict line.
+if ($clockVals.Count -le 1) {
+    Write-Output "the streaming cell never advanced -- the add-in should be loaded by now:"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+}
 
 $verdict = if ($dialog) { "FAIL (dialog: $dialog)" }
            elseif ($clockVals.Count -ge 4) { "PASS (Clock advanced $($clockVals.Count) distinct values)" }

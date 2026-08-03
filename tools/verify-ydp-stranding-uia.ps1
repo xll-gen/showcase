@@ -21,7 +21,7 @@
 
 . "$PSScriptRoot\uia-common.ps1"
 $ErrorActionPreference = 'Continue'
-$P = Resolve-ShowcasePaths; $xll = $P.Xll; $goLog = $P.GoLog
+$P = Resolve-ShowcasePaths; $xll = $P.Xll; $goLog = $P.GoLog; $nativeLog = $P.NativeLog
 if (-not (Test-Path $xll)) { Write-Output "MISSING XLL: $xll"; exit 2 }
 # Environment before product: an unmet Trust Center lever produces this
 # script's exact failure symptoms. See Assert-ExcelTrustPreconditions.
@@ -38,6 +38,10 @@ try { if (Test-Path $goLog) { Clear-Content $goLog -ErrorAction Stop } } catch {
 Stop-ShowcaseProcesses -IncludeGoServer
 Start-Sleep 1
 
+# $launchedAt gates the native-log rung of the load ladder: this script clears the
+# GO log but not the NATIVE one, so a native log left by an EARLIER run would
+# otherwise read as proof that the add-in loaded in THIS one.
+$launchedAt = Get-Date
 $app = New-Object -ComObject Excel.Application
 $app.Visible = $true
 $app.DisplayAlerts = $false
@@ -49,6 +53,7 @@ Start-Sleep 3  # let xlAutoOpen launch the Go server + register RTD
 
 $ydpCells = @('A2','B2','C2','A3','B3','C3','A5')
 $everStuck = @()
+$notLoaded = $false
 
 # Multi-round connect-storm: each round is a fresh workbook with the full burst
 # (the #GETTING_DATA repro), and the per-topic log check is the deterministic
@@ -87,9 +92,19 @@ for ($r = 1; $r -le $rounds; $r++) {
 
     Start-Sleep 7  # settle window for the network fetch + push
     $stuck = @()
+    $noFunc = 0
     foreach ($c in $ydpCells) {
         try { $txt = [string]$ws.Range($c).Text } catch { $txt = "<err>" }
         if ($txt -match 'GETTING_DATA|Getting Data') { $stuck += "$c='$txt'" }
+        if ($txt -match 'NAME\?') { $noFunc++ }
+    }
+    # EVERY target cell answering #NAME? means Excel does not know YDP at all, i.e.
+    # the add-in never registered -- an ENVIRONMENT verdict. Without this the round
+    # reports "all cells settled" and the run PASSES having tested nothing.
+    if ($noFunc -eq $ydpCells.Count) {
+        Write-Output "  ALL target cells are #NAME? -- the functions are not registered; the add-in should be loaded by now"
+        Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+        $notLoaded = $true
     }
     if ($stuck.Count -gt 0) { Write-Output ("  STILL STUCK: " + ($stuck -join '  ')); $everStuck += $stuck }
     else { Write-Output "  all YDP/YDH cells settled this round" }
@@ -110,8 +125,26 @@ Write-Output "go log lines: $goLines ;  'all guest slots busy'/'OnRtdConnect fai
 $busyLines | Select-Object -First 10 | ForEach-Object { Write-Output ("  " + $_.Line) }
 
 $excelAlive = [bool](Get-Process -Id $pidExcel -EA SilentlyContinue)
-$verdict = if ($everStuck.Count -gt 0) { "FAIL (stranded at #GETTING_DATA: $($everStuck -join ', '))" }
-           elseif ($busyLines.Count -gt 0) { "FAIL ($($busyLines.Count) busy-slot/connect-fail log lines)" }
+# An empty (or absent) Go log means the server was never launched, so nothing in
+# the add-in ran and 'no stranding observed' would be a PASS over an empty run.
+if ($goLines -eq 0) {
+    Write-Output "the Go log is empty -- the server never started; the add-in should be loaded by now:"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+    $notLoaded = $true
+}
+# VERDICT RANKING (corrected 2026-08-03). $notLoaded LATCHES: one round where
+# every target cell happened to read #NAME? sets it for the whole run. It used to
+# be tested FIRST, so a single transient all-#NAME? round turned an OBSERVED
+# stranding -- the product defect this script exists to find -- into
+# "VOID ... this run measured nothing", erasing the evidence. Positive evidence
+# now outranks the void: a cell seen at #GETTING_DATA, or a busy-slot line in the
+# Go log, is something that HAPPENED and cannot be un-observed by a later round
+# failing to load. VOID still wins over PASS/WEAK, because absence of evidence in
+# a run that may not have loaded is not evidence of absence.
+$notLoadedNote = if ($notLoaded) { " [NOTE: a round reported the add-in as not loaded -- see the XLL-LOAD DIAGNOSIS above; the positive evidence below still stands]" } else { "" }
+$verdict = if ($everStuck.Count -gt 0) { "FAIL (stranded at #GETTING_DATA: $($everStuck -join ', '))$notLoadedNote" }
+           elseif ($busyLines.Count -gt 0) { "FAIL ($($busyLines.Count) busy-slot/connect-fail log lines)$notLoadedNote" }
+           elseif ($notLoaded) { "VOID (the add-in was not loaded -- see the XLL-LOAD DIAGNOSIS above; this run measured nothing)" }
            elseif (-not $excelAlive) { "WEAK (Excel exited before all rounds — inconclusive on stability)" }
            else { "PASS (no #GETTING_DATA stranding across $rounds connect storms; log clean)" }
 Write-Output "Excel still alive: $excelAlive"

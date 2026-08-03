@@ -39,16 +39,32 @@ Start-Sleep 1
 $tmp = New-ShowcaseWorkbook -Name "uia_close_diag.xlsx"
 
 # launch Excel normally (no held COM client)
+# $launchedAt gates the native-log rung of the load ladder: this script does NOT
+# clear the logs, so a log left by an EARLIER run would otherwise read as proof
+# that the add-in loaded in THIS one.
+$launchedAt = Get-Date
 $p = Start-ShowcaseExcel -Workbook $tmp -Xll $xll
 $origPid = $p.Id
 Write-Output "launched EXCEL pid=$origPid"
 
 $win = Wait-ShowcaseWindow -LaunchedPid $origPid -Tries 30
-if (-not $win) { Write-Output "FAIL: no ready window"; Stop-ShowcaseProcesses; return }
+if (-not $win) {
+    # "No ready window" has two causes with one symptom: the add-in never loaded
+    # (environment) or it loaded and wedged Excel (product). Say which.
+    Write-Output "FAIL: no ready window"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+    Stop-ShowcaseProcesses; return
+}
 Start-Sleep 2
 
 $srvBefore = Get-Process xll_showcase -EA SilentlyContinue
 Write-Output ("server pids after load: " + (($srvBefore.Id) -join ',' ))
+# No server process after the window is up is the signature of an add-in that was
+# never loaded at all -- and every S1/S2 verdict below would then be about nothing.
+if (-not $srvBefore) {
+    Write-Output "WARN: no server process after load -- the add-in should be loaded by now"
+    Write-XllLoadDiagnosis -XllPath $xll -NativeLog $nativeLog -Since $launchedAt
+}
 
 # select custom ribbon tab + invoke Build (heavy calc -> CalculationEnded -> arms xlcOnTime)
 if (Invoke-RibbonButton -Window $win -NamePattern 'Build') { Write-Output "invoked Build" }
